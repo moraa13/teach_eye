@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TeachEye Lesson Mode — Учитель</title>
+    <link rel="stylesheet" href="/lesson-mode-static/styles.css" />
+  </head>
+  <body data-page="teacher">
+    <header class="topbar">
+      <div>
+        <h1>TeachEye Lesson Mode — Учитель</h1>
+        <p class="subtitle">Живая доска, управление темпом урока и мониторинг класса.</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="nav-link" href="/lesson-mode">Главная</a>
+        <a class="nav-link" href="/lesson-mode/student">Экран ученика</a>
+        <div class="status-pill" id="global-status">API: проверка...</div>
+      </div>
+    </header>
+
+    <main class="single-layout">
+      <section class="panel">
+        <div class="section-header">
+          <h2>Панель учителя</h2>
+          <button id="teacher-refresh-btn" class="secondary-btn">Обновить</button>
+        </div>
+
+        <div class="card">
+          <h3>Библиотека уроков</h3>
+          <div class="row">
+            <button id="ensure-demo-btn">Создать demo-урок</button>
+            <button id="load-lessons-btn" class="secondary-btn">Загрузить уроки</button>
+          </div>
+          <label class="field">
+            <span>Урок</span>
+            <select id="lesson-select"></select>
+          </label>
+          <label class="field">
+            <span>Класс</span>
+            <input id="teacher-class-input" type="text" value="8А" />
+          </label>
+          <div class="row">
+            <button id="start-run-btn">Запустить урок</button>
+            <span class="muted" id="teacher-run-meta">Активного урока нет</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-header compact">
+            <h3>Управление сценами</h3>
+            <button id="teacher-next-scene-btn" class="secondary-btn">Следующая сцена</button>
+          </div>
+          <div id="teacher-scenes" class="scene-chip-list"></div>
+          <div id="teacher-current-scene" class="scene-summary empty-state">
+            Сначала запусти урок, и здесь появится текущая сцена.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-header compact">
+            <h3>Ученики</h3>
+            <span class="muted" id="teacher-student-count">0 учеников</span>
+          </div>
+          <div id="teacher-student-tiles" class="student-tile-grid"></div>
+        </div>
+
+        <div class="card">
+          <div class="section-header compact">
+            <h3>Фокус ученика</h3>
+            <span class="muted" id="teacher-focus-meta">Никто не выбран</span>
+          </div>
+          <div id="teacher-student-focus" class="empty-state">
+            Выбери ученика из плиток, чтобы открыть его сцену, прогресс и последние запуски кода.
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/lesson-mode-static/teacher.js"></script>
+  </body>
+</html>

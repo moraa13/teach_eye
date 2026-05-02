@@ -1,0 +1,54 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.cursor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+dist/
+release/
+build/
+coverage/
+*.tsbuildinfo
+
+# Rust / Tauri
+target/
+
+# Logs / runtime artifacts
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+debug-*.log
+
+# Local env / secrets
+.env
+.env.*
+*.local
+.bash_history
+.python_history
+
+# Binary artifacts
+*.exe
+*.dll
+*.pdb
+*.zip
+*.7z
+*.msi
+
+# Project-generated artifacts
+desktop/lesson-app/dist/
+desktop/lesson-app/release/
+desktop/lesson-app/node_modules/
+desktop/lesson-app/src-tauri/target/
+dist/
+build/
+*.db

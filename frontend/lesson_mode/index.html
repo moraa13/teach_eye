@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TeachEye Lesson Mode</title>
+    <link rel="stylesheet" href="/lesson-mode-static/styles.css" />
+  </head>
+  <body data-page="landing">
+    <header class="topbar">
+      <div>
+        <h1>TeachEye Lesson Mode</h1>
+        <p class="subtitle">Прототип интерактивного урока: отдельный вход для учителя и ученика.</p>
+      </div>
+      <div class="status-pill" id="global-status">API: проверка...</div>
+    </header>
+
+    <main class="landing-layout">
+      <section class="landing-card">
+        <h2>Учителю</h2>
+        <p class="subtitle">
+          Запуск урока, управление сценами, список учеников, просмотр мини-превью и выдача звезд.
+        </p>
+        <a class="landing-link" href="/lesson-mode/teacher">Открыть панель учителя</a>
+      </section>
+
+      <section class="landing-card">
+        <h2>Ученику</h2>
+        <p class="subtitle">
+          Вход в сессию, подключение к уроку, интерактивные задания и запуск Python-кода.
+        </p>
+        <a class="landing-link" href="/lesson-mode/student">Открыть экран ученика</a>
+      </section>
+    </main>
+
+    <script type="module" src="/lesson-mode-static/landing.js"></script>
+  </body>
+</html>

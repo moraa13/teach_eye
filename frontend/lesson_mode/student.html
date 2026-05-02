@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TeachEye Lesson Mode — Ученик</title>
+    <link rel="stylesheet" href="/lesson-mode-static/styles.css" />
+  </head>
+  <body data-page="student">
+    <header class="topbar">
+      <div>
+        <h1>TeachEye Lesson Mode — Ученик</h1>
+        <p class="subtitle">Интерактивный урок, сохранение прогресса и быстрый запуск кода.</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="nav-link" href="/lesson-mode">Главная</a>
+        <a class="nav-link" href="/lesson-mode/teacher">Панель учителя</a>
+        <div class="status-pill" id="global-status">API: проверка...</div>
+      </div>
+    </header>
+
+    <main class="single-layout">
+      <section class="panel">
+        <div class="section-header">
+          <h2>Экран ученика</h2>
+          <button id="student-refresh-btn" class="secondary-btn">Синхронизировать</button>
+        </div>
+
+        <div class="card">
+          <h3>Вход в сессию</h3>
+          <div class="row two">
+            <label class="field">
+              <span>Класс</span>
+              <input id="student-class-input" type="text" value="8А" />
+            </label>
+            <label class="field">
+              <span>Фамилия и имя</span>
+              <input id="student-name-input" type="text" value="Иванов Иван" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="student-login-btn">Войти</button>
+            <span class="muted" id="student-session-meta">Сессия еще не создана</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Подключение к уроку</h3>
+          <label class="field">
+            <span>ID урока</span>
+            <input id="student-run-id-input" type="number" min="1" />
+          </label>
+          <div class="row">
+            <button id="use-current-run-btn" class="secondary-btn">Подставить текущий урок учителя</button>
+            <button id="student-join-btn">Подключиться</button>
+          </div>
+          <div class="muted" id="student-run-meta">Пока не подключен к уроку</div>
+        </div>
+
+        <div class="card">
+          <div class="section-header compact">
+            <h3>Текущая сцена</h3>
+            <div class="row">
+              <button id="student-prev-btn" class="secondary-btn">Назад</button>
+              <button id="student-next-btn" class="secondary-btn">Вперед</button>
+            </div>
+          </div>
+          <div id="student-scene-meta" class="muted">Подключись к уроку, чтобы начать работу.</div>
+          <div id="student-scene-title" class="scene-title"></div>
+          <div id="student-widgets" class="widget-stack"></div>
+        </div>
+
+        <div class="card">
+          <div class="section-header compact">
+            <h3>Python Runner</h3>
+            <span class="muted" id="code-run-meta">Ожидание</span>
+          </div>
+          <textarea id="code-editor" class="code-editor">print("Привет, TeachEye")</textarea>
+          <div class="row">
+            <button id="run-code-btn">Запустить код</button>
+          </div>
+          <pre id="code-output" class="code-output">Пока нет вывода.</pre>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/lesson-mode-static/student.js"></script>
+  </body>
+</html>
