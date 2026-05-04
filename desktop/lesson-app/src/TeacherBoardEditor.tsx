@@ -1,5 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { Editor, TLEditorSnapshot } from 'tldraw'
 import type { Scene, Widget } from './lessonRuntimeModels'
@@ -19,6 +27,24 @@ import {
 const DEBUG_BOARD_AGENT_LOGS = false
 
 const SCENE_DETAILS_STORAGE_KEY = 'teachereye.editor.scenePanelExpanded'
+
+/** Подъём tldraw → React-lesson отложен, чтобы не крутить весь стейт на каждый тик редактора. */
+const TEACHER_BOARD_PARENT_DEBOUNCE_MS = 450
+
+type TldrawPersistPayload = { snapshot: TLEditorSnapshot; widgets: Widget[] }
+
+function persistPayloadSignature(payload: TldrawPersistPayload): string {
+  return JSON.stringify({
+    snap: payload.snapshot,
+    widgets: payload.widgets.map((w) => ({
+      id: w.id,
+      layout: w.layout,
+      title: w.title,
+      widget_type: w.widget_type,
+      config: w.config,
+    })),
+  })
+}
 
 function readSceneDetailsOpen(): boolean {
   try {
@@ -43,6 +69,21 @@ type EditableLesson = {
 }
 
 type Selection = { kind: 'widget'; id: number } | { kind: 'element'; id: string } | null
+
+export type TeacherBoardEditorHandle = {
+  /** Сбросить отложенный persist и записать снимок доски в урок (перед сохранением на сервер). */
+  flushBoardPersist: () => void
+}
+
+export type TeacherBoardEditorProps = {
+  lesson: EditableLesson | null
+  sceneIndex: number
+  onSceneIndexChange: (sceneIndex: number) => void
+  onLessonChange: (lesson: EditableLesson) => void
+  onSave: () => void
+  saving: boolean
+  dirty: boolean
+}
 
 const WIDGET_LIBRARY: Array<{ type: string; label: string; config: Record<string, any> }> = [
   {
@@ -102,23 +143,11 @@ function updateElementGeometry(element: BoardElement, patch: Partial<BoardElemen
   return { ...element, ...patch } as BoardElement
 }
 
-export function TeacherBoardEditor({
-  lesson,
-  sceneIndex,
-  onSceneIndexChange,
-  onLessonChange,
-  onSave,
-  saving,
-  dirty,
-}: {
-  lesson: EditableLesson | null
-  sceneIndex: number
-  onSceneIndexChange: (sceneIndex: number) => void
-  onLessonChange: (lesson: EditableLesson) => void
-  onSave: () => void
-  saving: boolean
-  dirty: boolean
-}) {
+export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBoardEditorProps>(
+  function TeacherBoardEditor(
+    { lesson, sceneIndex, onSceneIndexChange, onLessonChange, onSave, saving, dirty },
+    ref,
+  ) {
   const [selected, setSelected] = useState<Selection>(null)
   const [sceneDetailsOpen, setSceneDetailsOpen] = useState(readSceneDetailsOpen)
   const [widgetType, setWidgetType] = useState(WIDGET_LIBRARY[0].type)
@@ -149,6 +178,12 @@ export function TeacherBoardEditor({
   const lessonRef = useRef(lesson)
   const sceneRef = useRef(scene)
   const sceneLayoutRef = useRef(sceneLayout)
+  const onLessonChangeRef = useRef(onLessonChange)
+  const sceneIndexRef = useRef(sceneIndex)
+  const lessonIdRef = useRef(lesson?.id ?? null)
+  onLessonChangeRef.current = onLessonChange
+  sceneIndexRef.current = sceneIndex
+  lessonIdRef.current = lesson?.id ?? null
   const selectedWidget = useMemo(
     () => (selected?.kind === 'widget' ? scene?.widgets.find((widget) => widget.id === selected.id) ?? null : null),
     [scene?.widgets, selected],
@@ -234,18 +269,98 @@ export function TeacherBoardEditor({
     setSelected(widgetId ? { kind: 'widget', id: widgetId } : null)
   }, [])
 
-  const handleTldrawPersist = useCallback(
-    (payload: { snapshot: TLEditorSnapshot; widgets: Widget[] }) => {
-      patchCurrentScene((currentScene, layout) => ({
-        ...currentScene,
-        widgets: payload.widgets,
-        layout: buildSceneLayout({
-          ...layout,
-          tldraw_snapshot: snapshotForLessonPersistence(payload.snapshot),
-        }),
-      }))
+  const parentPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const parentPendingRef = useRef<{ payload: TldrawPersistPayload; sceneIndex: number; lessonId: number } | null>(null)
+  const lastAppliedParentSigRef = useRef('')
+
+  const applyTldrawPayloadToLessonScene = useCallback((payload: TldrawPersistPayload, targetSceneIndex: number) => {
+    const L = lessonRef.current
+    if (!L) return
+    const sig = persistPayloadSignature(payload)
+    if (sig === lastAppliedParentSigRef.current) return
+    lastAppliedParentSigRef.current = sig
+    onLessonChangeRef.current({
+      ...L,
+      scenes: L.scenes.map((item, index) => {
+        if (index !== targetSceneIndex) return item
+        const currentLayout = normalizeSceneLayout(item.layout)
+        return {
+          ...item,
+          widgets: payload.widgets,
+          layout: buildSceneLayout({
+            ...currentLayout,
+            tldraw_snapshot: snapshotForLessonPersistence(payload.snapshot),
+          }),
+        }
+      }),
+    })
+  }, [])
+
+  const flushDeferredBoardPersist = useCallback(() => {
+    if (parentPersistTimerRef.current) {
+      clearTimeout(parentPersistTimerRef.current)
+      parentPersistTimerRef.current = null
+    }
+    const pending = parentPendingRef.current
+    if (!pending) return
+    if (pending.lessonId !== lessonIdRef.current) {
+      parentPendingRef.current = null
+      return
+    }
+    applyTldrawPayloadToLessonScene(pending.payload, pending.sceneIndex)
+    parentPendingRef.current = null
+  }, [applyTldrawPayloadToLessonScene])
+
+  const scheduleDeferredBoardPersist = useCallback(
+    (payload: TldrawPersistPayload) => {
+      const L = lessonRef.current
+      if (!L) return
+      parentPendingRef.current = { payload, sceneIndex: sceneIndexRef.current, lessonId: L.id }
+      if (parentPersistTimerRef.current) clearTimeout(parentPersistTimerRef.current)
+      parentPersistTimerRef.current = setTimeout(() => {
+        parentPersistTimerRef.current = null
+        const p = parentPendingRef.current
+        if (!p) return
+        if (p.lessonId !== lessonIdRef.current) return
+        applyTldrawPayloadToLessonScene(p.payload, p.sceneIndex)
+        parentPendingRef.current = null
+      }, TEACHER_BOARD_PARENT_DEBOUNCE_MS)
     },
-    [patchCurrentScene],
+    [applyTldrawPayloadToLessonScene],
+  )
+
+  useEffect(() => {
+    lastAppliedParentSigRef.current = ''
+  }, [lesson?.id, sceneIndex])
+
+  useImperativeHandle(ref, () => ({ flushBoardPersist: flushDeferredBoardPersist }), [flushDeferredBoardPersist])
+
+  useEffect(() => {
+    const capturedSceneIndex = sceneIndex
+    const capturedLessonId = lesson?.id ?? null
+    return () => {
+      if (parentPersistTimerRef.current) {
+        clearTimeout(parentPersistTimerRef.current)
+        parentPersistTimerRef.current = null
+      }
+      const p = parentPendingRef.current
+      if (
+        p &&
+        p.sceneIndex === capturedSceneIndex &&
+        p.lessonId === capturedLessonId &&
+        lessonRef.current?.id === capturedLessonId
+      ) {
+        applyTldrawPayloadToLessonScene(p.payload, p.sceneIndex)
+      }
+      parentPendingRef.current = null
+    }
+  }, [sceneIndex, lesson?.id, applyTldrawPayloadToLessonScene])
+
+  const handleTldrawPersist = useCallback(
+    (payload: TldrawPersistPayload) => {
+      scheduleDeferredBoardPersist(payload)
+    },
+    [scheduleDeferredBoardPersist],
   )
 
   const mirrorWidgetIntoTldraw = useCallback((widget: Widget, orderIndex: number) => {
@@ -820,4 +935,6 @@ export function TeacherBoardEditor({
       </div>
     </div>
   )
-}
+})
+
+TeacherBoardEditor.displayName = 'TeacherBoardEditor'

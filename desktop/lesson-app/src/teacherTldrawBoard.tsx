@@ -7,7 +7,7 @@ import { TeachEyeWidgetShapeUtil, TEACH_EYE_WIDGET_SHAPE_TYPE, type TeachEyeWidg
 import type { Widget } from './lessonRuntimeModels'
 import { normalizeWidgetLayout } from './sceneLayout'
 
-const PERSIST_DEBOUNCE_MS = 280
+const PERSIST_DEBOUNCE_MS = 380
 
 /** Strip session for mount — persisted session breaks reload when tldraw session schema drifts (hypothesis H12). */
 function mountSnapshotDocumentOnly(o: Record<string, unknown>): TLEditorSnapshot | undefined {

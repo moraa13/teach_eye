@@ -67,6 +67,9 @@ export class TeachEyeWidgetShapeUtil extends BaseBoxShapeUtil<any> {
             gap: 6,
             overflow: 'hidden',
           }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
         >
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
             <strong style={{ fontSize: 14, lineHeight: 1.2 }}>{title || 'Виджет'}</strong>

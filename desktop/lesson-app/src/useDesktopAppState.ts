@@ -819,7 +819,7 @@ export function useDesktopAppState() {
             }
           : null,
       )
-    }, 220)
+    }, 650)
     return () => window.clearTimeout(timer)
   }, [editorDirty, editorLesson, editorSceneIndex])
 

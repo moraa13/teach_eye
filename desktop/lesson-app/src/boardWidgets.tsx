@@ -1,4 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+/**
+ * Виджеты ученика/учителя в рантайме: разметка и колбэки. Геометрия на доске учителя в редакторе — в tldraw, не здесь.
+ */
 import type { ReactNode } from 'react'
 import type { Participant, Scene, Widget } from './lessonRuntimeModels'
 

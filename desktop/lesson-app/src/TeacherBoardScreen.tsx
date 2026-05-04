@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import { TeacherBoardEditor } from './TeacherBoardEditor'
+import { useEffect, useRef } from 'react'
+import { TeacherBoardEditor, type TeacherBoardEditorHandle } from './TeacherBoardEditor'
 import { TeacherBoardRuntime } from './boardRuntimeView'
 import type { Lesson, LessonRun, StatusKind } from './appTypes'
 import type { ParticipantInspection, Scene } from './lessonRuntimeModels'
@@ -60,6 +60,7 @@ export function TeacherBoardScreen({
   onCreateEmptyBoardDraft: () => void
   onCreateStarterBoardLesson: () => void
 }) {
+  const boardEditorRef = useRef<TeacherBoardEditorHandle | null>(null)
   const needsEditorSetup = teacherWorkspaceMode === 'editor' && !editorLesson
 
   useEffect(() => {
@@ -171,11 +172,15 @@ export function TeacherBoardScreen({
           </section>
         ) : (
           <TeacherBoardEditor
+            ref={boardEditorRef}
             lesson={editorLesson}
             sceneIndex={editorSceneIndex}
             onSceneIndexChange={onSelectEditorScene}
             onLessonChange={onChangeEditorLesson}
-            onSave={onSaveLesson}
+            onSave={() => {
+              boardEditorRef.current?.flushBoardPersist()
+              onSaveLesson()
+            }}
             saving={isSavingLesson}
             dirty={editorDirty}
           />
