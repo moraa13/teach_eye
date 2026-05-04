@@ -1,13 +1,32 @@
 import { invoke } from '@tauri-apps/api/core'
-import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useRef } from 'react'
+import {
+  Component,
+  forwardRef,
+  type ErrorInfo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+} from 'react'
 import { Tldraw, useEditor, type Editor, type TLEditorSnapshot, type TLShape } from 'tldraw'
 import 'tldraw/tldraw.css'
 
-import { TeachEyeWidgetShapeUtil, TEACH_EYE_WIDGET_SHAPE_TYPE, type TeachEyeWidgetShapeProps } from './teachEyeWidgetShape'
+import { TeachEyeWidgetShapeUtil } from './teachEyeWidgetShape'
+import { buildTeachEyeShapePartialFromWidget, mergeWidgetFromTeachEyeShape, type TeachEyeShapeLike } from './teachEyeShapes/lessonBridge'
+import { isTeachEyeManagedShapeType } from './teachEyeShapes/constants'
+import { TEACH_EYE_NATIVE_SHAPE_UTILS } from './teachEyeShapes/nativeShapes'
 import type { Widget } from './lessonRuntimeModels'
-import { normalizeWidgetLayout } from './sceneLayout'
 
 const PERSIST_DEBOUNCE_MS = 380
+
+function widgetIdsFingerprintFromShapes(shapes: Array<{ props: { widgetId: number } }>): string {
+  return shapes.map((s) => s.props.widgetId).sort((a, b) => a - b).join(',')
+}
+
+function widgetIdsFingerprintFromWidgets(widgets: Widget[]): string {
+  return widgets.map((w) => w.id).sort((a, b) => a - b).join(',')
+}
 
 /** Strip session for mount — persisted session breaks reload when tldraw session schema drifts (hypothesis H12). */
 function mountSnapshotDocumentOnly(o: Record<string, unknown>): TLEditorSnapshot | undefined {
@@ -97,15 +116,17 @@ export function layoutSnapshotToTldraw(raw: unknown): TLEditorSnapshot | undefin
   return undefined
 }
 
-function isTeachEyeWidgetShape(shape: TLShape): boolean {
-  return (shape as { type: string }).type === TEACH_EYE_WIDGET_SHAPE_TYPE
+const TEACH_EYE_BOARD_SHAPE_UTILS = [...TEACH_EYE_NATIVE_SHAPE_UTILS, TeachEyeWidgetShapeUtil]
+
+function isTeachEyeManagedBoardShape(shape: TLShape): boolean {
+  return isTeachEyeManagedShapeType(shape.type)
 }
 
 function getSelectedTeachEyeWidgetId(editor: Editor): number | null {
   for (const id of editor.getSelectedShapeIds()) {
     const shape = editor.getShape(id)
-    if (shape && isTeachEyeWidgetShape(shape)) {
-      return (shape as unknown as { props: TeachEyeWidgetShapeProps }).props.widgetId
+    if (shape && isTeachEyeManagedBoardShape(shape)) {
+      return (shape as unknown as { props: { widgetId: number } }).props.widgetId
     }
   }
   return null
@@ -153,25 +174,32 @@ class TldrawBoardErrorBoundary extends Component<{ children: ReactNode }, { err:
   }
 }
 
+/** Снимок доски; `widgets` только при смене набора виджетов или принудительной синхронизации (сохранение). */
+export type TeacherTldrawPersistPayload = {
+  snapshot: TLEditorSnapshot
+  widgets?: Widget[]
+}
+
+export type TeacherTldrawBoardHandle = {
+  /** Сбросить дебаунс и отправить в родителя (опционально с полной геометрией виджетов из шейпов). */
+  flushPersist: (opts?: { syncWidgetsFromShapes?: boolean }) => void
+}
+
 export type TeacherTldrawBoardProps = {
   /** Remount when the teacher switches scenes (include `sceneNavGen` so revisiting a scene reloads layout). */
   sceneMountKey: string
   /** Applied only on mount; parent must keep stable while editing the same scene. */
   initialSnapshot: TLEditorSnapshot | undefined
   widgets: Widget[]
-  onPersist: (payload: { snapshot: TLEditorSnapshot; widgets: Widget[] }) => void
+  onPersist: (payload: TeacherTldrawPersistPayload) => void
   onWidgetSelect?: (widgetId: number | null) => void
   onEditorReady?: (editor: Editor) => void
 }
 
-export function TeacherTldrawBoard({
-  sceneMountKey,
-  initialSnapshot,
-  widgets,
-  onPersist,
-  onWidgetSelect,
-  onEditorReady,
-}: TeacherTldrawBoardProps) {
+export const TeacherTldrawBoard = forwardRef<TeacherTldrawBoardHandle, TeacherTldrawBoardProps>(function TeacherTldrawBoard(
+  { sceneMountKey, initialSnapshot, widgets, onPersist, onWidgetSelect, onEditorReady },
+  ref,
+) {
   const editorRef = useRef<Editor | null>(null)
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const widgetsRef = useRef(widgets)
@@ -194,37 +222,27 @@ export function TeacherTldrawBoard({
     invoke('append_debug_log', { line }).catch(() => {})
   }, [sceneMountKey, widgets.length, initialSnapshot])
 
-  const flushPersist = useCallback(() => {
+  const runFlushPersist = useCallback(
+    (opts?: { syncWidgetsFromShapes?: boolean }) => {
     try {
       const editor = editorRef.current
       if (!editor) return
 
-      const shapes = editor.getCurrentPageShapes().filter(isTeachEyeWidgetShape) as unknown as Array<{
-        x: number
-        y: number
-        props: TeachEyeWidgetShapeProps
-      }>
-      const shapeByWidgetId = new Map(shapes.map((s) => [s.props.widgetId, s]))
+      const shapes = editor.getCurrentPageShapes().filter(isTeachEyeManagedBoardShape)
+      const shapeByWidgetId = new Map(
+        shapes.map((s) => [(s as unknown as { props: { widgetId: number } }).props.widgetId, s]),
+      )
       const baseWidgets = widgetsRef.current
-      const nextWidgets = baseWidgets.map((widget) => {
+      const nextWidgets = baseWidgets.map((widget, orderIndex) => {
         const shape = shapeByWidgetId.get(widget.id)
         if (!shape) return widget
-        const orderIndex = baseWidgets.indexOf(widget)
-        const layout = normalizeWidgetLayout(widget.layout, orderIndex >= 0 ? orderIndex : 0)
-        return {
-          ...widget,
-          title: shape.props.title,
-          widget_type: shape.props.widgetType,
-          layout: {
-            ...layout,
-            x: shape.x,
-            y: shape.y,
-            w: shape.props.w,
-            h: shape.props.h,
-          },
-          config: safeParseConfig(shape.props.configJson, (widget.config ?? {}) as Record<string, unknown>) as Widget['config'],
-        }
+        return mergeWidgetFromTeachEyeShape(widget, shape as unknown as TeachEyeShapeLike, orderIndex)
       })
+
+      const structureChanged =
+        widgetIdsFingerprintFromShapes(shapes as unknown as Array<{ props: { widgetId: number } }>) !==
+        widgetIdsFingerprintFromWidgets(baseWidgets)
+      const includeWidgets = opts?.syncWidgetsFromShapes === true || structureChanged
 
       let snapshot: TLEditorSnapshot
       try {
@@ -269,7 +287,9 @@ export function TeacherTldrawBoard({
 
       const snapshotToSave = snapshotForLessonPersistence(snapshot) as TLEditorSnapshot
       try {
-        onPersist({ snapshot: snapshotToSave, widgets: nextWidgets })
+        onPersist(
+          includeWidgets ? { snapshot: snapshotToSave, widgets: nextWidgets } : { snapshot: snapshotToSave },
+        )
       } catch (e) {
         // #region agent log
         fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1', {
@@ -304,15 +324,31 @@ export function TeacherTldrawBoard({
       }).catch(() => {})
       // #endregion
     }
-  }, [onPersist])
+  },
+  [onPersist],
+)
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      flushPersist: (opts) => {
+        if (persistTimerRef.current) {
+          clearTimeout(persistTimerRef.current)
+          persistTimerRef.current = null
+        }
+        runFlushPersist(opts)
+      },
+    }),
+    [runFlushPersist],
+  )
 
   const schedulePersist = useCallback(() => {
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current)
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null
-      flushPersist()
+      runFlushPersist()
     }, PERSIST_DEBOUNCE_MS)
-  }, [flushPersist])
+  }, [runFlushPersist])
 
   const handleMount = useCallback(
     (editor: Editor) => {
@@ -344,9 +380,8 @@ export function TeacherTldrawBoard({
         { source: 'user', scope: 'document' },
       )
 
-      let bootstrapped = false
       try {
-        bootstrapped = bootstrapWidgetsIfNeeded(editor, widgetsRef.current, initialSnapshot)
+        bootstrapWidgetsIfNeeded(editor, widgetsRef.current, initialSnapshot)
       } catch (e) {
         // #region agent log
         fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1', {
@@ -371,17 +406,15 @@ export function TeacherTldrawBoard({
           clearTimeout(persistTimerRef.current)
           persistTimerRef.current = null
         }
-        if (bootstrapped) {
-          try {
-            flushPersist()
-          } catch {
-            /* outer flushPersist already logs */
-          }
+        try {
+          runFlushPersist({ syncWidgetsFromShapes: true })
+        } catch {
+          /* logged inside */
         }
         editorRef.current = null
       }
     },
-    [flushPersist, initialSnapshot, onEditorReady, schedulePersist],
+    [initialSnapshot, onEditorReady, runFlushPersist, schedulePersist],
   )
 
   useEffect(() => {
@@ -395,7 +428,7 @@ export function TeacherTldrawBoard({
       <TldrawBoardErrorBoundary>
         <Tldraw
           key={sceneMountKey}
-          shapeUtils={[TeachEyeWidgetShapeUtil]}
+          shapeUtils={[...TEACH_EYE_BOARD_SHAPE_UTILS]}
           snapshot={initialSnapshot}
           onMount={handleMount}
         >
@@ -405,16 +438,9 @@ export function TeacherTldrawBoard({
       </TldrawBoardErrorBoundary>
     </div>
   )
-}
+})
 
-function safeParseConfig(json: string, fallback: Record<string, unknown>): Record<string, unknown> {
-  try {
-    const v = JSON.parse(json)
-    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : fallback
-  } catch {
-    return fallback
-  }
-}
+TeacherTldrawBoard.displayName = 'TeacherTldrawBoard'
 
 function bootstrapWidgetsIfNeeded(
   editor: Editor,
@@ -423,26 +449,12 @@ function bootstrapWidgetsIfNeeded(
 ): boolean {
   if (initialSnapshot) return false
   if (!widgets.length) return false
-  const existing = editor.getCurrentPageShapes().filter((s) => (s as { type: string }).type === TEACH_EYE_WIDGET_SHAPE_TYPE)
+  const existing = editor.getCurrentPageShapes().filter((s) => isTeachEyeManagedShapeType((s as { type: string }).type))
   if (existing.length > 0) return false
 
   const partials = []
   for (let index = 0; index < widgets.length; index++) {
-    const w = widgets[index]
-    const layout = normalizeWidgetLayout(w.layout, index)
-    partials.push({
-      type: TEACH_EYE_WIDGET_SHAPE_TYPE,
-      x: layout.x,
-      y: layout.y,
-      props: {
-        w: layout.w,
-        h: layout.h,
-        widgetId: w.id,
-        widgetType: w.widget_type,
-        title: w.title || w.widget_type,
-        configJson: JSON.stringify(w.config ?? {}),
-      },
-    })
+    partials.push(buildTeachEyeShapePartialFromWidget(widgets[index], index))
   }
   editor.createShapes(partials as never[])
   return true
@@ -476,25 +488,18 @@ function TeachEyeWidgetSync({ widgets }: { widgets: Widget[] }) {
         const existingIds = new Set(
           editor
             .getCurrentPageShapes()
-            .filter((s) => (s as { type: string }).type === TEACH_EYE_WIDGET_SHAPE_TYPE)
-            .map((s) => (s as unknown as { props: TeachEyeWidgetShapeProps }).props.widgetId),
+            .filter((s) => isTeachEyeManagedShapeType((s as { type: string }).type))
+            .map((s) => (s as unknown as { props: { widgetId: number } }).props.widgetId),
         )
         for (let index = 0; index < list.length; index++) {
           const w = list[index]
           if (existingIds.has(w.id)) continue
-          const layout = normalizeWidgetLayout(w.layout, index)
+          const partial = buildTeachEyeShapePartialFromWidget(w, index)
           editor.createShape({
-            type: TEACH_EYE_WIDGET_SHAPE_TYPE,
-            x: layout.x,
-            y: layout.y,
-            props: {
-              w: layout.w,
-              h: layout.h,
-              widgetId: w.id,
-              widgetType: w.widget_type,
-              title: w.title || w.widget_type,
-              configJson: JSON.stringify(w.config ?? {}),
-            },
+            type: partial.type,
+            x: partial.x,
+            y: partial.y,
+            props: partial.props,
           } as never)
         }
       })

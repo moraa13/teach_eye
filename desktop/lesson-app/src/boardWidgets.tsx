@@ -2,7 +2,7 @@
 /**
  * Виджеты ученика/учителя в рантайме: разметка и колбэки. Геометрия на доске учителя в редакторе — в tldraw, не здесь.
  */
-import type { ReactNode } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode, SyntheticEvent } from 'react'
 import type { Participant, Scene, Widget } from './lessonRuntimeModels'
 
 export type PowerModel = {
@@ -29,6 +29,27 @@ export type StudentWidgetCallbacks = {
   onMoveOrderingItem?: (widget: Widget, itemIndex: number, direction: -1 | 1) => void
 }
 
+/** Не использовать `disabled` в режиме наблюдателя: события «пробиваются» на холст tldraw. */
+function blockEventWhenSpectator(e: SyntheticEvent, isSpectator: boolean) {
+  if (!isSpectator) return
+  e.preventDefault()
+  e.stopPropagation()
+}
+
+function absorbWidgetPointerDown(e: ReactPointerEvent<Element>, isSpectator: boolean) {
+  e.stopPropagation()
+  if (isSpectator) e.preventDefault()
+}
+
+/**
+ * Слой превью редактора: tldraw (карандаш и др.) вешает слушатели выше — гасим capture,
+ * чтобы взаимодействие не уходило в инструмент рисования.
+ */
+function blockPointerFromReachingTldrawHost(e: ReactPointerEvent<HTMLDivElement>) {
+  e.stopPropagation()
+  e.nativeEvent.stopImmediatePropagation()
+}
+
 export function widgetProgress(participant: Participant | null | undefined, sceneId: number, widgetId: number) {
   return participant?.progress?.[String(sceneId)]?.[String(widgetId)] || {}
 }
@@ -43,6 +64,26 @@ export function buildBinaryValue(bits: number[]) {
     const power = bits.length - bitIndex - 1
     return sum + (bit ? 2 ** power : 0)
   }, 0)
+}
+
+const UNICODE_SUPERSCRIPT_DIGITS = '⁰¹²³⁴⁵⁶⁷⁸⁹'
+
+/** Показатель как Unicode-суперскрипт: 7 → ⁷, 10 → ¹⁰ */
+export function exponentToUnicodeSuperscript(exp: number): string {
+  if (!Number.isFinite(exp)) return '?'
+  const n = Math.floor(Math.abs(exp))
+  return String(n)
+    .split('')
+    .map((ch) => {
+      const d = ch.charCodeAt(0) - 48
+      return d >= 0 && d <= 9 ? UNICODE_SUPERSCRIPT_DIGITS[d]! : ch
+    })
+    .join('')
+}
+
+/** Запись вида 2⁷ (без ASCII `2^7`). */
+export function formatPowerOfTwoNotation(exp: number): string {
+  return `2${exponentToUnicodeSuperscript(exp)}`
 }
 
 export function getPairDefinitions(widget: Widget) {
@@ -476,9 +517,16 @@ export function renderStudentWidget(
           {options.map((option: string, index: number) => (
             <button
               key={`${widget.id}-${index}`}
-              className={`option-btn ${selectedIndex === index ? 'active' : ''}`}
-              disabled={isSpectator}
-              onClick={() => callbacks.onSelectMultipleChoice?.(widget, index)}
+              type="button"
+              className={`option-btn ${selectedIndex === index ? 'active' : ''}${isSpectator ? ' widget-spectator-inert' : ''}`}
+              aria-disabled={isSpectator}
+              onPointerDown={(e) => absorbWidgetPointerDown(e, isSpectator)}
+              onClick={(e) => {
+                blockEventWhenSpectator(e, isSpectator)
+                e.stopPropagation()
+                if (isSpectator) return
+                callbacks.onSelectMultipleChoice?.(widget, index)
+              }}
             >
               {option}
             </button>
@@ -514,24 +562,41 @@ export function renderStudentWidget(
             </div>
             <div className="context-card purple">
               <div className="context-title">Калькулятор степеней двойки</div>
-              <div className="power-grid">
-                {model.values.map((value, index) => (
-                  <button
-                    key={value}
-                    className={`power-button ${model.selectedValues.includes(value) ? 'active' : ''}`}
-                    disabled={isSpectator}
-                    onClick={() => callbacks.onTogglePowerValue?.(widget, value)}
-                  >
-                    <span className="power-value">{value}</span>
-                    <span className="power-meta">2^{model.values.length - index - 1}</span>
-                  </button>
-                ))}
+              <div className="power-two-table" role="group" aria-label="Таблица степеней двойки, выбор слагаемых">
+                <div className="power-two-table-head">
+                  <span>Степень</span>
+                  <span>Значение</span>
+                </div>
+                {model.values.map((value, index) => {
+                  const exp = model.values.length - index - 1
+                  const selected = model.selectedValues.includes(value)
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`power-two-table-row ${selected ? 'active' : ''}${isSpectator ? ' widget-spectator-inert' : ''}`}
+                      aria-pressed={selected}
+                      aria-disabled={isSpectator}
+                      aria-label={`${formatPowerOfTwoNotation(exp)} равно ${value}, ${selected ? 'выбрано' : 'не выбрано'}`}
+                      onPointerDown={(e) => absorbWidgetPointerDown(e, isSpectator)}
+                      onClick={(e) => {
+                        blockEventWhenSpectator(e, isSpectator)
+                        e.stopPropagation()
+                        if (isSpectator) return
+                        callbacks.onTogglePowerValue?.(widget, value)
+                      }}
+                    >
+                      <span className="power-two-expr">{formatPowerOfTwoNotation(exp)}</span>
+                      <span className="power-two-val">{value}</span>
+                    </button>
+                  )
+                })}
               </div>
               <div className="binary-strip">
                 {model.binaryString.split('').map((bit, index) => (
                   <div key={`${bit}-${index}`} className={`binary-cell ${bit === '1' ? 'active' : ''}`}>
                     <strong>{bit}</strong>
-                    <small>2^{model.values.length - index - 1}</small>
+                    <small>{formatPowerOfTwoNotation(model.values.length - index - 1)}</small>
                   </div>
                 ))}
               </div>
@@ -579,9 +644,16 @@ export function renderStudentWidget(
                 {bits.map((bit: number, bitIndex: number) => (
                   <button
                     key={`${widget.id}-${rowIndex}-${bitIndex}`}
-                    className={`bit-btn ${bit ? 'active' : ''}`}
-                    disabled={isSpectator}
-                    onClick={() => callbacks.onToggleBinaryBit?.(widget, rowIndex, bitIndex)}
+                    type="button"
+                    className={`bit-btn ${bit ? 'active' : ''}${isSpectator ? ' widget-spectator-inert' : ''}`}
+                    aria-disabled={isSpectator}
+                    onPointerDown={(e) => absorbWidgetPointerDown(e, isSpectator)}
+                    onClick={(e) => {
+                      blockEventWhenSpectator(e, isSpectator)
+                      e.stopPropagation()
+                      if (isSpectator) return
+                      callbacks.onToggleBinaryBit?.(widget, rowIndex, bitIndex)
+                    }}
                   >
                     {bit}
                   </button>
@@ -613,6 +685,7 @@ export function renderStudentWidget(
               ) : (
                 <select
                   value={matches[String(pairIndex)] || ''}
+                  onPointerDown={(e) => e.stopPropagation()}
                   onChange={(event) => callbacks.onSetMatchPair?.(widget, pairIndex, event.target.value)}
                 >
                   <option value="">Выбери пару</option>
@@ -644,12 +717,20 @@ export function renderStudentWidget(
                 <div className="ordering-actions">
                   {!isSpectator ? (
                     <>
-                      <button className="ghost" disabled={itemIndex <= 0} onClick={() => callbacks.onMoveOrderingItem?.(widget, itemIndex, -1)}>
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={itemIndex <= 0}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={() => callbacks.onMoveOrderingItem?.(widget, itemIndex, -1)}
+                      >
                         Вверх
                       </button>
                       <button
+                        type="button"
                         className="ghost"
                         disabled={itemIndex >= order.length - 1}
+                        onPointerDown={(e) => e.stopPropagation()}
                         onClick={() => callbacks.onMoveOrderingItem?.(widget, itemIndex, 1)}
                       >
                         Вниз
@@ -671,6 +752,22 @@ export function renderStudentWidget(
     <div className="board-widget-card" key={widget.id}>
       <div className="card-title">{widget.title || widget.widget_type}</div>
       <div className="student-meta">{summarizeWidgetProgress(widget, progress)}</div>
+    </div>
+  )
+}
+
+/** Превью на доске учителя (tldraw): тот же UI, что у ученика, но без взаимодействия. */
+export function renderBoardWidgetEditorPreview(scene: Scene, widget: Widget) {
+  return (
+    <div
+      className="board-widget-editor-preview-blocker"
+      onPointerDownCapture={blockPointerFromReachingTldrawHost}
+      onPointerMoveCapture={(e) => {
+        if (e.buttons !== 0) blockPointerFromReachingTldrawHost(e)
+      }}
+      onPointerUpCapture={blockPointerFromReachingTldrawHost}
+    >
+      {renderStudentWidget(scene, widget, {}, {}, 'student-spectator')}
     </div>
   )
 }

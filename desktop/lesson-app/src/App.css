@@ -575,6 +575,77 @@
   color: var(--text);
 }
 
+.power-two-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.power-two-table-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 6px 12px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(207, 225, 255, 0.58);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.power-two-table-head span:last-child {
+  text-align: right;
+}
+
+.power-two-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4f8ff;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.power-two-table-row:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(118, 172, 255, 0.38);
+}
+
+.power-two-table-row:disabled {
+  cursor: default;
+}
+
+.power-two-table-row.active {
+  background: rgba(199, 167, 255, 0.4);
+  border-color: rgba(255, 255, 255, 0.85);
+}
+
+.power-two-expr {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.power-two-val {
+  font-size: 20px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .binary-strip {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
@@ -617,6 +688,15 @@
 
 .muted {
   color: var(--text);
+}
+
+.widget-spectator-inert {
+  cursor: default;
+  user-select: none;
+}
+
+.board-widget-editor-preview-blocker {
+  min-height: 0;
 }
 
 .ok {
@@ -1272,11 +1352,17 @@
   display: flex;
 }
 
+/* Stacking: холст tldraw ниже боковых HUD; нижняя зона свободна под панель инструментов tldraw (см. bottom у floating-stack). */
+.teacher-editor-board-stage.teacher-editor-hud-root {
+  isolation: isolate;
+}
+
 .teacher-tldraw-root {
   flex: 1;
   min-width: 0;
   min-height: 0;
   position: relative;
+  z-index: 0;
 }
 
 .teacher-tldraw-root .tl-container {
@@ -1299,9 +1385,48 @@
   pointer-events: none;
 }
 
+.teacher-editor-board-stage.teacher-editor-hud-root > .teacher-editor-floating-stack {
+  z-index: 2;
+  bottom: 96px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: none;
+}
+
+.teacher-editor-board-stage.teacher-editor-hud-root > .teacher-editor-floating-stack > * {
+  pointer-events: auto;
+}
+
 .teacher-editor-floating-stack > *,
 .teacher-editor-floating-dock > * {
   pointer-events: auto;
+}
+
+.teacher-editor-hud-collapse-row {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.teacher-editor-hud-collapse-toggle.ghost {
+  min-width: 36px;
+  padding: 4px 10px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.teacher-editor-left-hud-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.teacher-editor-floating-stack.teacher-editor-floating-top-left.teacher-editor-floating-left-collapsed {
+  width: auto;
+  min-width: 0;
+  max-width: min(52px, calc(100% - 20px));
 }
 
 .teacher-editor-floating-top-left {
@@ -1332,6 +1457,20 @@
 
 .teacher-editor-hud-root .teacher-editor-floating-top-right {
   width: min(190px, calc(100% - 20px));
+}
+
+@media (max-width: 960px) {
+  .teacher-editor-hud-root .teacher-editor-floating-top-right {
+    width: min(148px, calc(42vw - 12px));
+    max-width: calc(50vw - 56px);
+  }
+}
+
+@media (max-width: 640px) {
+  .teacher-editor-hud-root .teacher-editor-floating-top-right {
+    width: min(132px, 38vw);
+    max-width: calc(50vw - 48px);
+  }
 }
 
 .teacher-editor-hud-root .teacher-editor-hud-panel {
@@ -1887,11 +2026,286 @@
   }
 
   .teacher-editor-hud-root .teacher-editor-floating-top-right {
-    width: min(190px, calc(100% - 24px));
+    width: min(148px, calc(42vw - 12px));
+    max-width: calc(50vw - 56px);
   }
 
   .teacher-editor-floating-dock {
     bottom: 12px;
     max-width: calc(100% - 24px);
   }
+}
+
+/* tldraw: TeachEye кастомный виджет-шейп (HTMLContainer) */
+.teach-eye-widget-shape-html-surface {
+  display: inline-block;
+  width: auto;
+  min-width: 100%;
+  height: auto;
+  min-height: 100%;
+  box-sizing: border-box;
+  border-radius: 8px;
+  overflow: visible;
+  transition: box-shadow 0.16s ease;
+}
+
+.teach-eye-widget-shape-html-surface:hover {
+  box-shadow:
+    0 6px 22px rgba(0, 0, 0, 0.38),
+    0 0 0 1px rgba(118, 172, 255, 0.22);
+}
+
+.teach-eye-widget-shape-card {
+  width: max-content;
+  max-width: min(100%, 720px);
+  height: auto;
+  min-height: 0;
+  box-sizing: border-box;
+  border-radius: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(7, 12, 22, 0.88);
+  color: #e8f0ff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: visible;
+}
+
+.teach-eye-widget-shape-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.teach-eye-widget-shape-header:active {
+  cursor: grabbing;
+}
+
+.teach-eye-widget-shape-title {
+  font-size: 14px;
+  line-height: 1.2;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teach-eye-widget-shape-type {
+  font-size: 11px;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+
+.teach-eye-widget-shape-body {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-x: visible;
+  overflow-y: visible;
+}
+
+.teach-eye-widget-shape-body--powers-minimal {
+  gap: 0;
+}
+
+.teach-eye-widget-shape-body--powers-minimal .teach-eye-widget-shape-interactive {
+  margin-top: 0;
+}
+
+.teach-eye-widget-shape-help {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.72;
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+
+.teach-eye-widget-shape-preview-error {
+  color: #fecaca;
+  opacity: 1;
+}
+
+.teach-eye-widget-shape-editing-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9ec5ff;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(118, 172, 255, 0.12);
+  width: fit-content;
+}
+
+.teach-eye-widget-shape-interactive {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  align-self: stretch;
+  overflow-x: hidden;
+  overflow-y: auto;
+  margin-top: 0;
+}
+
+.teach-eye-widget-shape-preview-root {
+  flex: 1 1 auto;
+  min-height: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.teach-eye-widget-shape-preview-root .board-widget-card {
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.teach-eye-widget-shape-preview-root .board-widget-card > .card-title {
+  display: none;
+}
+
+.teach-eye-widget-shape-preview-root .power-workspace.desktop-board-power,
+.teach-eye-widget-shape-preview-root .power-workspace {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.teach-eye-widget-shape-preview-root .context-card {
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+.teach-eye-widget-shape-preview-root .kv-grid {
+  margin-top: 8px;
+  gap: 4px 8px;
+  font-size: 10px;
+}
+
+.teach-eye-widget-shape-preview-root .formula-text {
+  font-size: 15px;
+}
+
+.teach-eye-widget-shape-preview-root .power-two-table {
+  gap: 2px;
+}
+
+.teach-eye-widget-shape-preview-root .power-two-table-head {
+  padding: 4px 6px 6px;
+  font-size: 9px;
+  gap: 8px;
+}
+
+.teach-eye-widget-shape-preview-root .power-two-table-row {
+  padding: 6px 8px;
+  border-radius: 8px;
+  gap: 8px;
+}
+
+.teach-eye-widget-shape-preview-root .power-two-expr {
+  font-size: 14px;
+}
+
+.teach-eye-widget-shape-preview-root .power-two-val {
+  font-size: 14px;
+}
+
+.teach-eye-widget-shape-preview-root .binary-strip {
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.teach-eye-widget-shape-preview-root .binary-cell {
+  padding: 2px;
+  font-size: 9px;
+}
+
+.teach-eye-widget-shape-preview-root .option-list {
+  gap: 6px;
+}
+
+.teach-eye-widget-shape-preview-root .option-btn {
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.teach-eye-widget-shape-preview-root .bits-grid {
+  gap: 4px;
+}
+
+.teach-eye-widget-shape-preview-root .bit-btn {
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.teach-eye-widget-shape-preview-root .ordering-copy-code,
+.teach-eye-widget-shape-preview-root .ordering-copy {
+  font-size: 10px;
+}
+
+/* Компактная таблица степеней двойки на tldraw-шейпе (только просмотр) */
+.teach-eye-powers-simple {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+}
+
+.teach-eye-powers-simple-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.teach-eye-powers-simple-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.teach-eye-powers-simple-row-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(207, 225, 255, 0.55);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 7px 10px;
+}
+
+.teach-eye-powers-simple-row-head span:last-child {
+  text-align: right;
+}
+
+.teach-eye-powers-simple-row:not(.teach-eye-powers-simple-row-head):nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.teach-eye-powers-simple-pow {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.teach-eye-powers-simple-num {
+  text-align: right;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }

@@ -9,9 +9,17 @@ import {
   useState,
 } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { Editor, TLEditorSnapshot } from 'tldraw'
+import type { Editor } from 'tldraw'
 import type { Scene, Widget } from './lessonRuntimeModels'
-import { layoutSnapshotToTldraw, snapshotForLessonPersistence, TeacherTldrawBoard } from './teacherTldrawBoard'
+import {
+  layoutSnapshotToTldraw,
+  snapshotForLessonPersistence,
+  TeacherTldrawBoard,
+  type TeacherTldrawBoardHandle,
+  type TeacherTldrawPersistPayload,
+} from './teacherTldrawBoard'
+import { isTeachEyeManagedShapeType, widgetRuntimeTypeToShapeType } from './teachEyeShapes/constants'
+import { buildTeachEyeShapePartialFromWidget, mirrorNativeShapeFromWidget, type TeachEyeShapeLike } from './teachEyeShapes/lessonBridge'
 import { TEACH_EYE_WIDGET_SHAPE_TYPE } from './teachEyeWidgetShape'
 import {
   buildSceneLayout,
@@ -27,14 +35,24 @@ import {
 const DEBUG_BOARD_AGENT_LOGS = false
 
 const SCENE_DETAILS_STORAGE_KEY = 'teachereye.editor.scenePanelExpanded'
+const LEFT_HUD_COLLAPSED_KEY = 'teachereye.editor.leftHudCollapsed'
 
-/** Подъём tldraw → React-lesson отложен, чтобы не крутить весь стейт на каждый тик редактора. */
+/** Подъём только снимка tldraw → React-lesson отложен; полный список виджетов приезжает при смене структуры или flush перед сохранением. */
 const TEACHER_BOARD_PARENT_DEBOUNCE_MS = 450
 
-type TldrawPersistPayload = { snapshot: TLEditorSnapshot; widgets: Widget[] }
+function readLeftHudCollapsed(): boolean {
+  try {
+    return localStorage.getItem(LEFT_HUD_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
-function persistPayloadSignature(payload: TldrawPersistPayload): string {
-  return JSON.stringify({
+function persistPayloadSignature(payload: TeacherTldrawPersistPayload): string {
+  if (payload.widgets === undefined) {
+    return `snap:${JSON.stringify(payload.snapshot)}`
+  }
+  return `full:${JSON.stringify({
     snap: payload.snapshot,
     widgets: payload.widgets.map((w) => ({
       id: w.id,
@@ -43,7 +61,7 @@ function persistPayloadSignature(payload: TldrawPersistPayload): string {
       widget_type: w.widget_type,
       config: w.config,
     })),
-  })
+  })}`
 }
 
 function readSceneDetailsOpen(): boolean {
@@ -103,6 +121,21 @@ const WIDGET_LIBRARY: Array<{ type: string; label: string; config: Record<string
       task_text: 'Собери число из степеней двойки.',
       target_value: 42,
       values: [128, 64, 32, 16, 8, 4, 2, 1],
+      node_address: '192.168.1.10',
+      mask_address: '255.255.255.0',
+      answer_label: 'Цель',
+      teacher_board_text: 'Подсказка на доске: собери нужную сумму.',
+      reward_tenths: 10,
+    },
+  },
+  {
+    type: 'binary_decomposition',
+    label: 'Двоичное разложение',
+    config: {
+      tasks: [
+        { target_value: 13, bit_count: 8 },
+        { target_value: 42, bit_count: 8 },
+      ],
     },
   },
   {
@@ -150,6 +183,7 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
   ) {
   const [selected, setSelected] = useState<Selection>(null)
   const [sceneDetailsOpen, setSceneDetailsOpen] = useState(readSceneDetailsOpen)
+  const [leftHudCollapsed, setLeftHudCollapsed] = useState(readLeftHudCollapsed)
   const [widgetType, setWidgetType] = useState(WIDGET_LIBRARY[0].type)
   const [widgetConfigDraft, setWidgetConfigDraft] = useState('{}')
   const [widgetConfigError, setWidgetConfigError] = useState<string | null>(null)
@@ -158,6 +192,7 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
   const prevSceneIndexForTldrawRef = useRef(sceneIndex)
   const tldrawSceneNavGenRef = useRef(0)
   const tldrawEditorRef = useRef<Editor | null>(null)
+  const tldrawBoardRef = useRef<TeacherTldrawBoardHandle | null>(null)
   const tldrawMountCacheRef = useRef<{ key: string; snap: ReturnType<typeof layoutSnapshotToTldraw> }>({
     key: '',
     snap: undefined,
@@ -270,15 +305,35 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
   }, [])
 
   const parentPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const parentPendingRef = useRef<{ payload: TldrawPersistPayload; sceneIndex: number; lessonId: number } | null>(null)
+  const parentPendingRef = useRef<{ payload: TeacherTldrawPersistPayload; sceneIndex: number; lessonId: number } | null>(
+    null,
+  )
   const lastAppliedParentSigRef = useRef('')
 
-  const applyTldrawPayloadToLessonScene = useCallback((payload: TldrawPersistPayload, targetSceneIndex: number) => {
+  const applyTldrawPayloadToLessonScene = useCallback((payload: TeacherTldrawPersistPayload, targetSceneIndex: number) => {
     const L = lessonRef.current
     if (!L) return
     const sig = persistPayloadSignature(payload)
     if (sig === lastAppliedParentSigRef.current) return
     lastAppliedParentSigRef.current = sig
+    const nextWidgets = payload.widgets
+    if (nextWidgets === undefined) {
+      onLessonChangeRef.current({
+        ...L,
+        scenes: L.scenes.map((item, index) => {
+          if (index !== targetSceneIndex) return item
+          const currentLayout = normalizeSceneLayout(item.layout)
+          return {
+            ...item,
+            layout: buildSceneLayout({
+              ...currentLayout,
+              tldraw_snapshot: snapshotForLessonPersistence(payload.snapshot),
+            }),
+          }
+        }),
+      })
+      return
+    }
     onLessonChangeRef.current({
       ...L,
       scenes: L.scenes.map((item, index) => {
@@ -286,7 +341,7 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
         const currentLayout = normalizeSceneLayout(item.layout)
         return {
           ...item,
-          widgets: payload.widgets,
+          widgets: nextWidgets,
           layout: buildSceneLayout({
             ...currentLayout,
             tldraw_snapshot: snapshotForLessonPersistence(payload.snapshot),
@@ -301,18 +356,12 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
       clearTimeout(parentPersistTimerRef.current)
       parentPersistTimerRef.current = null
     }
-    const pending = parentPendingRef.current
-    if (!pending) return
-    if (pending.lessonId !== lessonIdRef.current) {
-      parentPendingRef.current = null
-      return
-    }
-    applyTldrawPayloadToLessonScene(pending.payload, pending.sceneIndex)
     parentPendingRef.current = null
-  }, [applyTldrawPayloadToLessonScene])
+    tldrawBoardRef.current?.flushPersist({ syncWidgetsFromShapes: true })
+  }, [])
 
   const scheduleDeferredBoardPersist = useCallback(
-    (payload: TldrawPersistPayload) => {
+    (payload: TeacherTldrawPersistPayload) => {
       const L = lessonRef.current
       if (!L) return
       parentPendingRef.current = { payload, sceneIndex: sceneIndexRef.current, lessonId: L.id }
@@ -336,58 +385,72 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
   useImperativeHandle(ref, () => ({ flushBoardPersist: flushDeferredBoardPersist }), [flushDeferredBoardPersist])
 
   useEffect(() => {
-    const capturedSceneIndex = sceneIndex
-    const capturedLessonId = lesson?.id ?? null
     return () => {
       if (parentPersistTimerRef.current) {
         clearTimeout(parentPersistTimerRef.current)
         parentPersistTimerRef.current = null
       }
-      const p = parentPendingRef.current
-      if (
-        p &&
-        p.sceneIndex === capturedSceneIndex &&
-        p.lessonId === capturedLessonId &&
-        lessonRef.current?.id === capturedLessonId
-      ) {
-        applyTldrawPayloadToLessonScene(p.payload, p.sceneIndex)
-      }
       parentPendingRef.current = null
     }
-  }, [sceneIndex, lesson?.id, applyTldrawPayloadToLessonScene])
+  }, [sceneIndex, lesson?.id])
 
   const handleTldrawPersist = useCallback(
-    (payload: TldrawPersistPayload) => {
+    (payload: TeacherTldrawPersistPayload) => {
+      if (payload.widgets !== undefined) {
+        if (parentPersistTimerRef.current) {
+          clearTimeout(parentPersistTimerRef.current)
+          parentPersistTimerRef.current = null
+        }
+        parentPendingRef.current = null
+        applyTldrawPayloadToLessonScene(payload, sceneIndexRef.current)
+        return
+      }
       scheduleDeferredBoardPersist(payload)
     },
-    [scheduleDeferredBoardPersist],
+    [applyTldrawPayloadToLessonScene, scheduleDeferredBoardPersist],
   )
 
   const mirrorWidgetIntoTldraw = useCallback((widget: Widget, orderIndex: number) => {
     const editor = tldrawEditorRef.current
     if (!editor) return
     const layout = normalizeWidgetLayout(widget.layout, orderIndex)
+    const desiredType = widgetRuntimeTypeToShapeType(widget.widget_type)
     const targets = editor.getCurrentPageShapes().filter((s) => {
       const sh = s as unknown as { type: string; props: { widgetId: number } }
-      return sh.type === TEACH_EYE_WIDGET_SHAPE_TYPE && sh.props.widgetId === widget.id
+      return isTeachEyeManagedShapeType(sh.type) && sh.props.widgetId === widget.id
     })
     for (const shape of targets) {
-      editor.updateShapes([
-        {
-          id: shape.id,
-          type: TEACH_EYE_WIDGET_SHAPE_TYPE as never,
-          x: layout.x,
-          y: layout.y,
-          props: {
-            ...(shape as unknown as { props: Record<string, unknown> }).props,
-            w: layout.w,
-            h: layout.h,
-            title: widget.title,
-            widgetType: widget.widget_type,
-            configJson: JSON.stringify(widget.config ?? {}),
-          },
-        } as never,
-      ])
+      const sid = shape.id
+      const sh = shape as unknown as { type: string; props: Record<string, unknown> }
+      if (sh.type === desiredType) {
+        const mirrored = mirrorNativeShapeFromWidget(widget, orderIndex, shape as unknown as TeachEyeShapeLike)
+        if (mirrored) {
+          editor.updateShapes([mirrored as never])
+          continue
+        }
+        editor.updateShapes([
+          {
+            id: sid,
+            type: TEACH_EYE_WIDGET_SHAPE_TYPE as never,
+            x: layout.x,
+            y: layout.y,
+            props: {
+              ...sh.props,
+              w: layout.w,
+              h: layout.h,
+              title: widget.title,
+              widgetType: widget.widget_type,
+              configJson: JSON.stringify(widget.config ?? {}),
+            },
+          } as never,
+        ])
+        continue
+      }
+      const fresh = buildTeachEyeShapePartialFromWidget(widget, orderIndex)
+      editor.run(() => {
+        editor.deleteShapes([sid as never])
+        editor.createShapes([{ id: sid, type: fresh.type, x: fresh.x, y: fresh.y, props: fresh.props } as never])
+      })
     }
   }, [])
 
@@ -446,7 +509,7 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
         .getCurrentPageShapes()
         .filter((s) => {
           const sh = s as unknown as { type: string; props: { widgetId: number } }
-          return sh.type === TEACH_EYE_WIDGET_SHAPE_TYPE && sh.props.widgetId === selected.id
+          return isTeachEyeManagedShapeType(sh.type) && sh.props.widgetId === selected.id
         })
         .map((s) => s.id)
       if (shapeIds.length) editor.deleteShapes(shapeIds)
@@ -485,7 +548,7 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
     if (editor) {
       const shapes = editor.getCurrentPageShapes().filter((s) => {
         const sh = s as unknown as { type: string; props: { widgetId: number } }
-        return sh.type === TEACH_EYE_WIDGET_SHAPE_TYPE && sh.props.widgetId === selected.id
+        return isTeachEyeManagedShapeType(sh.type) && sh.props.widgetId === selected.id
       })
       if (shapes.length) editor.bringToFront(shapes.map((s) => s.id))
     }
@@ -594,6 +657,7 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
       <div className="teacher-editor-canvas-card teacher-editor-canvas-card-full teacher-editor-canvas-card-overlay">
         <div className="teacher-editor-board-stage teacher-editor-hud-root">
           <TeacherTldrawBoard
+            ref={tldrawBoardRef}
             sceneMountKey={tldrawSceneMountKey}
             initialSnapshot={tldrawInitialSnapshot}
             widgets={scene.widgets}
@@ -604,7 +668,33 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
             }}
           />
 
-          <div className="teacher-editor-floating-stack teacher-editor-floating-top-left">
+          <div
+            className={`teacher-editor-floating-stack teacher-editor-floating-top-left ${leftHudCollapsed ? 'teacher-editor-floating-left-collapsed' : ''}`}
+          >
+            <div className="teacher-editor-hud-collapse-row">
+              <button
+                type="button"
+                className="teacher-editor-hud-collapse-toggle ghost"
+                onClick={() => {
+                  setLeftHudCollapsed((prev) => {
+                    const next = !prev
+                    try {
+                      localStorage.setItem(LEFT_HUD_COLLAPSED_KEY, next ? '1' : '0')
+                    } catch {
+                      /* ignore */
+                    }
+                    return next
+                  })
+                }}
+                aria-expanded={!leftHudCollapsed}
+                aria-controls="teacher-editor-left-hud-panels"
+                title={leftHudCollapsed ? 'Развернуть левую панель' : 'Свернуть левую панель'}
+              >
+                {leftHudCollapsed ? '›' : '‹'}
+              </button>
+            </div>
+            {!leftHudCollapsed ? (
+              <div id="teacher-editor-left-hud-panels" className="teacher-editor-left-hud-panels">
             <div className="teacher-editor-menu-panel teacher-editor-floating-panel teacher-editor-hud-panel">
               <div className="teacher-editor-panel-label">Навигация</div>
               <div className="teacher-editor-hud-nav-block">
@@ -751,6 +841,8 @@ export const TeacherBoardEditor = forwardRef<TeacherBoardEditorHandle, TeacherBo
                 </div>
               </details>
             </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="teacher-editor-floating-stack teacher-editor-floating-top-right">
