@@ -80,6 +80,8 @@ export type BoardElement = PenBoardElement | TextBoardElement | RectangleBoardEl
 export type SceneBoardLayout = {
   viewport: SceneViewport
   board_elements: BoardElement[]
+  /** Persisted tldraw editor snapshot (see TeacherTldrawBoard). Optional during migration. */
+  tldraw_snapshot?: unknown
 }
 
 const DEFAULT_VIEWPORT: SceneViewport = {
@@ -221,9 +223,11 @@ export function normalizeSceneLayout(rawLayout: unknown): SceneBoardLayout {
     background: typeof rawViewport.background === 'string' ? rawViewport.background : DEFAULT_VIEWPORT.background,
   }
   const elements = Array.isArray(layout.board_elements) ? layout.board_elements.map(normalizeBoardElement) : []
+  const tldraw_snapshot = 'tldraw_snapshot' in layout ? (layout as Record<string, unknown>).tldraw_snapshot : undefined
   return {
     viewport,
     board_elements: elements.sort((left, right) => left.z - right.z),
+    ...(tldraw_snapshot !== undefined ? { tldraw_snapshot } : {}),
   }
 }
 
@@ -233,6 +237,7 @@ export function buildSceneLayout(layout: SceneBoardLayout): SceneBoardLayout {
     board_elements: layout.board_elements
       .map((element, index) => normalizeBoardElement(element, index))
       .sort((left, right) => left.z - right.z),
+    ...(layout.tldraw_snapshot !== undefined ? { tldraw_snapshot: layout.tldraw_snapshot } : {}),
   }
 }
 

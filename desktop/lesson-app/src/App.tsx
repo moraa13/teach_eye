@@ -57,6 +57,8 @@ function App() {
         onSaveLesson={() => void teacher.saveEditedLesson()}
         isSavingLesson={teacher.isSavingLesson}
         editorDirty={teacher.editorDirty}
+        onCreateEmptyBoardDraft={teacher.createEmptyBoardDraft}
+        onCreateStarterBoardLesson={() => void teacher.createStarterBoardLesson()}
       />
     </StandaloneSurfaceBoundary>
   )
@@ -221,7 +223,7 @@ function App() {
         <div className="sidebar-panel">
           <div className="card-title">Окна</div>
           <div className="card-actions">
-            <button className="ghost" onClick={() => void api.openSurfaceWindow('teacher', 'board')}>
+            <button className="ghost" onClick={teacher.openBoardEditor}>
               Board window
             </button>
             <button className="ghost" onClick={() => void api.openSurfaceWindow('teacher', 'control')}>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { buildBinaryValue, buildPowerModel, getInitialOrdering, getOrderingItems, type StudentWidgetCallbacks } from './boardWidgets'
 import { buildSceneLayout, createBoardElementId } from './sceneLayout'
 import type { Lesson, LessonRun, LessonSummary, Role, TeacherSurface, StatusKind, WindowKind } from './appTypes'
@@ -26,6 +27,7 @@ const API_BASE_STORAGE_KEY = 'teachereye.desktop.apiBase'
 const RUN_STORAGE_KEY = 'teachereye.desktop.currentRunId'
 const SESSION_STORAGE_KEY = 'teachereye.desktop.currentSessionId'
 const TEACHER_CONTEXT_STORAGE_KEY = 'teachereye.desktop.teacherContext'
+const TEACHER_EDITOR_DRAFT_STORAGE_KEY = 'teachereye.desktop.teacherEditorDraft'
 const STUDENT_CONTEXT_STORAGE_KEY = 'teachereye.desktop.studentContext'
 const DEFAULT_LAN_API_BASE = 'http://192.168.0.10:8000'
 
@@ -47,8 +49,27 @@ function getWindowParams() {
     window.location.hash.length > 1
       ? new URLSearchParams(window.location.hash.slice(1))
       : new URLSearchParams()
-  const role = injectedParams?.role ?? fromSearch.get('role') ?? fromHash.get('role')
-  const surface = injectedParams?.surface ?? fromSearch.get('surface') ?? fromHash.get('surface')
+
+  let role = injectedParams?.role ?? fromSearch.get('role') ?? fromHash.get('role')
+  let surface = injectedParams?.surface ?? fromSearch.get('surface') ?? fromHash.get('surface')
+
+  /** When initialization_script does not run, URL has no ?/# — still resolve via Tauri window label. */
+  let winLabel: string | null = null
+  try {
+    winLabel = getCurrentWindow().label
+    if (winLabel === 'teacher-board') {
+      role = 'teacher'
+      surface = 'board'
+    } else if (winLabel === 'teacher-control') {
+      role = 'teacher'
+      surface = 'control'
+    } else if (winLabel === 'student') {
+      role = 'student'
+      surface = surface ?? 'control'
+    }
+  } catch {
+    winLabel = null
+  }
 
   let windowKind: WindowKind = 'main'
   if (role === 'student') {
@@ -60,7 +81,7 @@ function getWindowParams() {
   }
 
   // #region agent log
-  fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d405cf'},body:JSON.stringify({sessionId:'d405cf',runId:'pre-fix',hypothesisId:'H2',location:'useDesktopAppState.ts:54',message:'window_params_parsed',data:{injectedRole:injectedParams?.role??null,injectedSurface:injectedParams?.surface??null,search:window.location.search,hash:window.location.hash,resolvedRole:role,resolvedSurface:surface,windowKind},timestamp:Date.now()})}).catch(()=>{});
+  fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d405cf'},body:JSON.stringify({sessionId:'d405cf',runId:'pre-fix',hypothesisId:'H2',location:'useDesktopAppState.ts:54',message:'window_params_parsed',data:{injectedRole:injectedParams?.role??null,injectedSurface:injectedParams?.surface??null,winLabel,search:window.location.search,hash:window.location.hash,resolvedRole:role,resolvedSurface:surface,windowKind},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
 
   return {
@@ -119,6 +140,29 @@ function readStoredStudentContext(): {
   }
 }
 
+function readStoredTeacherEditorDraft(): {
+  lesson: Lesson | null
+  sceneIndex: number
+  dirty: boolean
+} | null {
+  try {
+    const raw = localStorage.getItem(TEACHER_EDITOR_DRAFT_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as {
+      lesson?: Lesson | null
+      sceneIndex?: number
+      dirty?: boolean
+    }
+    return {
+      lesson: parsed.lesson && typeof parsed.lesson === 'object' ? parsed.lesson : null,
+      sceneIndex: typeof parsed.sceneIndex === 'number' && Number.isFinite(parsed.sceneIndex) ? parsed.sceneIndex : 0,
+      dirty: Boolean(parsed.dirty),
+    }
+  } catch {
+    return null
+  }
+}
+
 function writeTeacherContext(context: {
   selectedLessonId: number | null
   teacherClassName: string
@@ -138,6 +182,21 @@ function writeStudentContext(context: {
   const next = JSON.stringify(context)
   if (localStorage.getItem(STUDENT_CONTEXT_STORAGE_KEY) === next) return
   localStorage.setItem(STUDENT_CONTEXT_STORAGE_KEY, next)
+}
+
+function writeTeacherEditorDraft(draft: {
+  lesson: Lesson | null
+  sceneIndex: number
+  dirty: boolean
+} | null) {
+  if (!draft?.lesson) {
+    if (!localStorage.getItem(TEACHER_EDITOR_DRAFT_STORAGE_KEY)) return
+    localStorage.removeItem(TEACHER_EDITOR_DRAFT_STORAGE_KEY)
+    return
+  }
+  const next = JSON.stringify(draft)
+  if (localStorage.getItem(TEACHER_EDITOR_DRAFT_STORAGE_KEY) === next) return
+  localStorage.setItem(TEACHER_EDITOR_DRAFT_STORAGE_KEY, next)
 }
 
 function normalizeApiBase(value: string) {
@@ -559,6 +618,7 @@ function buildEmptyBoardLessonDraft(): Lesson {
 export function useDesktopAppState() {
   const windowParams = getWindowParams()
   const storedTeacherContext = readStoredTeacherContext()
+  const storedTeacherEditorDraft = readStoredTeacherEditorDraft()
   const storedStudentContext = readStoredStudentContext()
 
   const [role, setRole] = useState<Role>(windowParams.role)
@@ -580,9 +640,11 @@ export function useDesktopAppState() {
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
   const [selectedInspection, setSelectedInspection] = useState<ParticipantInspection | null>(null)
   const [projectedSessionId, setProjectedSessionId] = useState<number | null>(null)
-  const [editorLesson, setEditorLesson] = useState<Lesson | null>(null)
-  const [editorSceneIndex, setEditorSceneIndex] = useState(0)
-  const [editorDirty, setEditorDirty] = useState(false)
+  const [editorLesson, setEditorLesson] = useState<Lesson | null>(() =>
+    storedTeacherEditorDraft?.lesson ? cloneLesson(storedTeacherEditorDraft.lesson) : null,
+  )
+  const [editorSceneIndex, setEditorSceneIndex] = useState(storedTeacherEditorDraft?.sceneIndex ?? 0)
+  const [editorDirty, setEditorDirty] = useState(storedTeacherEditorDraft?.dirty ?? false)
   const [isSavingLesson, setIsSavingLesson] = useState(false)
 
   const [studentName, setStudentName] = useState(storedStudentContext?.studentName ?? 'Иванов Иван')
@@ -609,6 +671,13 @@ export function useDesktopAppState() {
       windowKind: windowParams.windowKind,
       role: windowParams.role,
       surface: windowParams.surface,
+      winLabel: (() => {
+        try {
+          return getCurrentWindow().label
+        } catch {
+          return null
+        }
+      })(),
       storedTeacherContext,
     })
     // #endregion
@@ -740,6 +809,21 @@ export function useDesktopAppState() {
   }, [selectedLessonId, teacherClassName, teacherWorkspaceMode])
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      writeTeacherEditorDraft(
+        editorLesson
+          ? {
+              lesson: editorLesson,
+              sceneIndex: editorSceneIndex,
+              dirty: editorDirty,
+            }
+          : null,
+      )
+    }, 220)
+    return () => window.clearTimeout(timer)
+  }, [editorDirty, editorLesson, editorSceneIndex])
+
+  useEffect(() => {
     writeStudentContext({
       studentName,
       studentClassName,
@@ -811,6 +895,29 @@ export function useDesktopAppState() {
         const nextApiBase = normalizeApiBase(event.newValue)
         setApiBase(nextApiBase)
         setApiBaseInput(nextApiBase)
+      }
+
+      if (event.key === TEACHER_EDITOR_DRAFT_STORAGE_KEY) {
+        if (!event.newValue) {
+          setEditorLesson(null)
+          setEditorSceneIndex(0)
+          setEditorDirty(false)
+          return
+        }
+        try {
+          const nextDraft = JSON.parse(event.newValue) as {
+            lesson?: Lesson | null
+            sceneIndex?: number
+            dirty?: boolean
+          }
+          setEditorLesson(nextDraft.lesson && typeof nextDraft.lesson === 'object' ? cloneLesson(nextDraft.lesson) : null)
+          setEditorSceneIndex(
+            typeof nextDraft.sceneIndex === 'number' && Number.isFinite(nextDraft.sceneIndex) ? nextDraft.sceneIndex : 0,
+          )
+          setEditorDirty(Boolean(nextDraft.dirty))
+        } catch {
+          // Ignore malformed editor draft payloads.
+        }
       }
 
       if (event.key === STUDENT_CONTEXT_STORAGE_KEY && event.newValue) {
@@ -1594,6 +1701,10 @@ export function useDesktopAppState() {
   }, [loadLessonDetail, teacherClassName])
 
   const openBoardEditor = useCallback(() => {
+    if (!selectedLessonId && !editorLesson) {
+      createEmptyBoardDraft()
+      return
+    }
     setTeacherWorkspaceMode('editor')
     writeTeacherContext({
       selectedLessonId,
@@ -1604,7 +1715,7 @@ export function useDesktopAppState() {
       void loadLessonDetail(selectedLessonId, true)
     }
     void openSurfaceWindow('teacher', 'board')
-  }, [loadLessonDetail, openSurfaceWindow, selectedLessonId, teacherClassName])
+  }, [createEmptyBoardDraft, editorLesson, loadLessonDetail, openSurfaceWindow, selectedLessonId, teacherClassName])
 
   const loginAndOpenStudentWindow = useCallback(async () => {
     if (!studentSessionId) {

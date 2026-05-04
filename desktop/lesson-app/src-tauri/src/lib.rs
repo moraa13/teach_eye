@@ -42,7 +42,7 @@ fn append_debug_log(line: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_surface_window(
+async fn open_surface_window(
   app: tauri::AppHandle,
   label: String,
   role: String,
@@ -96,19 +96,39 @@ fn open_surface_window(
     json!({ "role": role, "surface": surface })
   );
 
-  let result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
+  // Windows Webview2: calling `build()` synchronously from the IPC stack can deadlock or never finish.
+  // Yield so the invoke returns from the sync portion; then build on the async runtime thread (Tauri #4121 pattern).
+  tokio::task::yield_now().await;
+  tokio::time::sleep(std::time::Duration::from_millis(32)).await;
+
+  write_debug_log(
+    format!(
+      "{{\"sessionId\":\"ffe9af\",\"runId\":\"async-yield-build\",\"hypothesisId\":\"H1\",\"location\":\"src-tauri/src/lib.rs:pre_build\",\"message\":\"open_surface_window:about_to_build\",\"data\":{{\"label\":\"{}\",\"role\":\"{}\",\"surface\":\"{}\"}},\"timestamp\":{}}}\n",
+      label,
+      role,
+      surface,
+      now_ms()
+    )
+    .as_str(),
+  );
+
+  let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
     .title(title)
     .inner_size(width, height)
     .min_inner_size(1100.0, 720.0)
     .resizable(true)
-    .initialization_script(&initialization_script)
-    .build();
+    .initialization_script(&initialization_script);
 
-  match result {
+  #[cfg(debug_assertions)]
+  let builder = builder.devtools(true);
+
+  let result = builder.build();
+
+  match &result {
     Ok(_) => {
       write_agent_debug_log(
         format!(
-          "{{\"sessionId\":\"d405cf\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H5\",\"location\":\"src-tauri/src/lib.rs:98\",\"message\":\"open_surface_window_built\",\"data\":{{\"label\":\"{}\",\"role\":\"{}\",\"surface\":\"{}\",\"url\":\"index.html\"}},\"timestamp\":{}}}\n",
+          "{{\"sessionId\":\"d405cf\",\"runId\":\"async-yield-build\",\"hypothesisId\":\"H5\",\"location\":\"src-tauri/src/lib.rs:build_ok\",\"message\":\"open_surface_window_built\",\"data\":{{\"label\":\"{}\",\"role\":\"{}\",\"surface\":\"{}\",\"url\":\"index.html\",\"path\":\"async_yield\"}},\"timestamp\":{}}}\n",
           label,
           role,
           surface,
@@ -118,7 +138,7 @@ fn open_surface_window(
       );
       write_debug_log(
         format!(
-          "{{\"sessionId\":\"ffe9af\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H1\",\"location\":\"src-tauri/src/lib.rs:69\",\"message\":\"open_surface_window:built\",\"data\":{{\"label\":\"{}\",\"role\":\"{}\",\"surface\":\"{}\"}},\"timestamp\":{}}}\n",
+          "{{\"sessionId\":\"ffe9af\",\"runId\":\"async-yield-build\",\"hypothesisId\":\"H1\",\"location\":\"src-tauri/src/lib.rs:build_ok\",\"message\":\"open_surface_window:built\",\"data\":{{\"label\":\"{}\",\"role\":\"{}\",\"surface\":\"{}\"}},\"timestamp\":{}}}\n",
           label,
           role,
           surface,
@@ -131,7 +151,7 @@ fn open_surface_window(
     Err(error) => {
       write_agent_debug_log(
         format!(
-          "{{\"sessionId\":\"d405cf\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H5\",\"location\":\"src-tauri/src/lib.rs:113\",\"message\":\"open_surface_window_failed\",\"data\":{{\"label\":\"{}\",\"error\":\"{}\"}},\"timestamp\":{}}}\n",
+          "{{\"sessionId\":\"d405cf\",\"runId\":\"async-yield-build\",\"hypothesisId\":\"H5\",\"location\":\"src-tauri/src/lib.rs:build_err\",\"message\":\"open_surface_window_failed\",\"data\":{{\"label\":\"{}\",\"error\":\"{}\"}},\"timestamp\":{}}}\n",
           label,
           error.to_string().replace('\"', "'"),
           now_ms()
@@ -140,7 +160,7 @@ fn open_surface_window(
       );
       write_debug_log(
         format!(
-          "{{\"sessionId\":\"ffe9af\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H1\",\"location\":\"src-tauri/src/lib.rs:80\",\"message\":\"open_surface_window:error\",\"data\":{{\"label\":\"{}\",\"error\":\"{}\"}},\"timestamp\":{}}}\n",
+          "{{\"sessionId\":\"ffe9af\",\"runId\":\"async-yield-build\",\"hypothesisId\":\"H1\",\"location\":\"src-tauri/src/lib.rs:build_err\",\"message\":\"open_surface_window:error\",\"data\":{{\"label\":\"{}\",\"error\":\"{}\"}},\"timestamp\":{}}}\n",
           label,
           error.to_string().replace('\"', "'"),
           now_ms()

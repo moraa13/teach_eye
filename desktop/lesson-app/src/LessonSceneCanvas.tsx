@@ -1,4 +1,4 @@
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import { memo, useMemo, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { normalizeSceneLayout, type BoardElement, type WidgetLayout } from './sceneLayout'
 
 export type CanvasWidget = {
@@ -54,7 +54,7 @@ function renderDrawing(element: Extract<BoardElement, { type: 'pen' | 'highlight
   )
 }
 
-function BoardElementNode({
+const BoardElementNode = memo(function BoardElementNode({
   element,
   selected,
   onClick,
@@ -138,7 +138,7 @@ function BoardElementNode({
       {element.type === 'pen' || element.type === 'highlighter' ? renderDrawing(element) : null}
     </div>
   )
-}
+})
 
 export function LessonSceneCanvas({
   rawLayout,
@@ -151,6 +151,9 @@ export function LessonSceneCanvas({
   onElementPointerDown,
   onCanvasPointerDown,
   onCanvasClick,
+  hiddenElementId,
+  previewElement,
+  previewElementSelected = false,
   overlay,
   className = '',
 }: {
@@ -164,10 +167,21 @@ export function LessonSceneCanvas({
   onElementPointerDown?: (elementId: string, event: ReactPointerEvent<HTMLDivElement>) => void
   onCanvasPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void
   onCanvasClick?: () => void
+  hiddenElementId?: string | null
+  previewElement?: BoardElement | null
+  previewElementSelected?: boolean
   overlay?: ReactNode
   className?: string
 }) {
   const layout = normalizeSceneLayout(rawLayout)
+  const visibleElements = useMemo(
+    () => layout.board_elements.filter((element) => element.id !== hiddenElementId),
+    [hiddenElementId, layout.board_elements],
+  )
+  const sortedWidgets = useMemo(
+    () => widgets.slice().sort((left, right) => left.layout.z - right.layout.z),
+    [widgets],
+  )
   return (
     <div className={`lesson-scene-canvas-shell lesson-scene-mode-${mode} ${className}`.trim()} data-canvas-mode={mode}>
       <div
@@ -183,7 +197,7 @@ export function LessonSceneCanvas({
       >
         {layout.viewport.showGrid ? <div className="lesson-scene-grid" /> : null}
         <div className="lesson-scene-layer lesson-scene-board-layer">
-          {layout.board_elements.map((element) => (
+          {visibleElements.map((element) => (
             <BoardElementNode
               key={element.id}
               element={element}
@@ -193,12 +207,29 @@ export function LessonSceneCanvas({
               onPointerDown={onElementPointerDown ? (event) => onElementPointerDown(element.id, event) : undefined}
             />
           ))}
+          {previewElement ? (
+            <BoardElementNode
+              key={`preview-${previewElement.id}`}
+              element={previewElement}
+              selected={previewElementSelected}
+              onClick={previewElement.type !== 'text' ? undefined : onSelectElement ? () => onSelectElement(previewElement.id) : undefined}
+              onDoubleClick={
+                previewElement.type !== 'text'
+                  ? undefined
+                  : onElementDoubleClick
+                    ? () => onElementDoubleClick(previewElement.id)
+                    : undefined
+              }
+              onPointerDown={
+                onElementPointerDown && previewElement.type !== 'text'
+                  ? (event) => onElementPointerDown(previewElement.id, event)
+                  : undefined
+              }
+            />
+          ) : null}
         </div>
         <div className="lesson-scene-layer lesson-scene-widget-layer">
-          {widgets
-            .slice()
-            .sort((left, right) => left.layout.z - right.layout.z)
-            .map((widget) => (
+          {sortedWidgets.map((widget) => (
               <div
                 key={widget.id}
                 className={`lesson-scene-widget ${widget.selected ? 'selected' : ''} ${widget.className ?? ''}`.trim()}

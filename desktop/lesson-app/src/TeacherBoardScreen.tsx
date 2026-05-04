@@ -31,6 +31,8 @@ export function TeacherBoardScreen({
   onSaveLesson,
   isSavingLesson,
   editorDirty,
+  onCreateEmptyBoardDraft,
+  onCreateStarterBoardLesson,
 }: {
   statusKind: StatusKind
   currentLessonLabel: string | null
@@ -55,7 +57,63 @@ export function TeacherBoardScreen({
   onSaveLesson: () => void
   isSavingLesson: boolean
   editorDirty: boolean
+  onCreateEmptyBoardDraft: () => void
+  onCreateStarterBoardLesson: () => void
 }) {
+  const needsEditorSetup = teacherWorkspaceMode === 'editor' && !editorLesson
+
+  useEffect(() => {
+    const onErr = (event: ErrorEvent) => {
+      // #region agent log
+      fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ac6ffd' },
+        body: JSON.stringify({
+          sessionId: 'ac6ffd',
+          runId: 'dbg-board',
+          hypothesisId: 'H3',
+          location: 'TeacherBoardScreen.tsx:window.onerror',
+          message: String(event.message),
+          data: {
+            filename: event.filename,
+            lineno: event.lineno,
+            colno: event.colno,
+            stack: event.error instanceof Error ? event.error.stack : undefined,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {})
+      // #endregion
+    }
+    const onRej = (event: PromiseRejectionEvent) => {
+      // #region agent log
+      const reason = event.reason
+      fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ac6ffd' },
+        body: JSON.stringify({
+          sessionId: 'ac6ffd',
+          runId: 'dbg-board',
+          hypothesisId: 'H3',
+          location: 'TeacherBoardScreen.tsx:unhandledrejection',
+          message: 'unhandledrejection',
+          data: {
+            err: reason instanceof Error ? reason.message : String(reason),
+            stack: reason instanceof Error ? reason.stack : undefined,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {})
+      // #endregion
+    }
+    window.addEventListener('error', onErr)
+    window.addEventListener('unhandledrejection', onRej)
+    return () => {
+      window.removeEventListener('error', onErr)
+      window.removeEventListener('unhandledrejection', onRej)
+    }
+  }, [])
+
   useEffect(() => {
     if (!DEBUG_BOARD_MOUNT_LOGS) return
     // #region agent log
@@ -83,7 +141,48 @@ export function TeacherBoardScreen({
     // #region agent log
     fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d405cf'},body:JSON.stringify({sessionId:'d405cf',runId:'pre-fix',hypothesisId:'H3',location:'TeacherBoardScreen.tsx:82',message:'teacher_board_screen_mount',data:{teacherWorkspaceMode,lessonId:editorLesson?.id??teacherLesson?.id??null,editorSceneIndex,teacherSceneCount:teacherSceneList.length,currentEditorSceneId:currentEditorScene?.id??null,currentTeacherSceneId:currentTeacherScene?.id??null},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
-  }, [editorLesson?.id, editorLesson?.scenes.length, teacherLesson?.id, teacherLesson?.scenes.length, teacherWorkspaceMode])
+  }, [
+    currentEditorScene?.id,
+    currentTeacherScene?.id,
+    editorLesson?.id,
+    editorLesson?.scenes.length,
+    editorSceneIndex,
+    teacherLesson?.id,
+    teacherLesson?.scenes.length,
+    teacherSceneList.length,
+    teacherWorkspaceMode,
+  ])
+
+  if (teacherWorkspaceMode === 'editor') {
+    return (
+      <section className="screen board-window-shell board-window-editor-shell">
+        {needsEditorSetup ? (
+          <section className="card board-window-empty">
+            <div className="card-title">Доска еще не подготовлена</div>
+            <p className="info-text">
+              Создай локальный draft или стартовый board-урок, чтобы сразу перейти в полноценное рабочее пространство.
+            </p>
+            <div className="card-actions">
+              <button onClick={onCreateEmptyBoardDraft}>Пустая доска</button>
+              <button className="ghost" onClick={onCreateStarterBoardLesson}>
+                Новый board-урок
+              </button>
+            </div>
+          </section>
+        ) : (
+          <TeacherBoardEditor
+            lesson={editorLesson}
+            sceneIndex={editorSceneIndex}
+            onSceneIndexChange={onSelectEditorScene}
+            onLessonChange={onChangeEditorLesson}
+            onSave={onSaveLesson}
+            saving={isSavingLesson}
+            dirty={editorDirty}
+          />
+        )}
+      </section>
+    )
+  }
 
   return (
     <section className="screen">
@@ -104,7 +203,7 @@ export function TeacherBoardScreen({
           </div>
           <div className="desktop-hero-card">
             <span>Режим доски</span>
-            <strong>{teacherWorkspaceMode === 'editor' ? 'Editor' : 'Live runtime'}</strong>
+            <strong>Live runtime</strong>
           </div>
           <div className="desktop-hero-card">
             <span>Класс</span>
@@ -120,10 +219,10 @@ export function TeacherBoardScreen({
         </div>
         <div className="screen-header-actions">
           <div className="workspace-mode-switch">
-            <button className={teacherWorkspaceMode === 'editor' ? 'active' : 'ghost'} onClick={() => onSetWorkspaceMode('editor')}>
+            <button className="ghost" onClick={() => onSetWorkspaceMode('editor')}>
               Editor
             </button>
-            <button className={teacherWorkspaceMode === 'runtime' ? 'active' : 'ghost'} onClick={() => onSetWorkspaceMode('runtime')}>
+            <button className="active" onClick={() => onSetWorkspaceMode('runtime')} disabled={!teacherRun}>
               Live runtime
             </button>
           </div>
@@ -135,66 +234,46 @@ export function TeacherBoardScreen({
 
       <div className="content-grid board-screen-grid">
         <section className="card">
-          <div className="card-title">{teacherWorkspaceMode === 'editor' ? 'Scene strip' : 'Сцены урока'}</div>
+          <div className="card-title">Сцены урока</div>
           <div className="scene-chip-list">
             {teacherSceneList.map((scene, index) => (
               <button
                 key={scene.id}
-                className={`scene-chip ${
-                  (teacherWorkspaceMode === 'editor' ? editorSceneIndex : teacherRun?.current_scene_index) === index ? 'current' : ''
-                } ${teacherWorkspaceMode === 'runtime' && teacherRun && index > teacherRun.highest_unlocked_scene_index ? 'locked' : ''}`}
-                onClick={() =>
-                  teacherWorkspaceMode === 'editor' ? onSelectEditorScene(index) : onOpenTeacherScene(index)
-                }
+                className={`scene-chip ${teacherRun?.current_scene_index === index ? 'current' : ''} ${
+                  teacherRun && index > teacherRun.highest_unlocked_scene_index ? 'locked' : ''
+                }`}
+                onClick={() => onOpenTeacherScene(index)}
               >
                 {index + 1}. {scene.title}
               </button>
             ))}
           </div>
-          {teacherWorkspaceMode === 'runtime' ? (
-            <button className="ghost" onClick={() => onOpenTeacherScene()}>
-              Следующая сцена
-            </button>
-          ) : null}
+          <button className="ghost" onClick={() => onOpenTeacherScene()}>
+            Следующая сцена
+          </button>
           <div className="info-text">
-            {teacherWorkspaceMode === 'editor'
-              ? currentEditorScene
-                ? `Редактируется сцена ${editorSceneIndex + 1} из ${editorLesson?.scenes.length ?? 0}`
-                : 'Открой урок, чтобы редактировать сцену'
-              : teacherRun
+            {teacherRun
               ? `Открыто ученикам до сцены ${teacherRun.highest_unlocked_scene_index + 1}`
               : 'Урок еще не запущен'}
           </div>
         </section>
 
         <section className="card card-wide board-main-card">
-          <div className="card-title">{teacherWorkspaceMode === 'editor' ? 'Teacher Board Editor' : 'Teacher Live Board'}</div>
-          {teacherWorkspaceMode === 'editor' ? (
-            <TeacherBoardEditor
-              lesson={editorLesson}
-              sceneIndex={editorSceneIndex}
-              onSceneIndexChange={onSelectEditorScene}
-              onLessonChange={onChangeEditorLesson}
-              onSave={onSaveLesson}
-              saving={isSavingLesson}
-              dirty={editorDirty}
+          <div className="card-title">Teacher Live Board</div>
+          <div key={editorSceneAnimKey}>
+            <TeacherBoardRuntime
+              scene={currentTeacherScene}
+              currentSceneIndex={teacherRun?.current_scene_index ?? 0}
+              lessonSceneCount={teacherLesson?.scenes.length ?? 0}
+              highestUnlockedSceneIndex={(teacherRun?.highest_unlocked_scene_index ?? 0) + 1}
+              participants={teacherRun?.participants ?? []}
+              projectedInspection={
+                projectedSessionId && selectedInspection?.participant.session_id === projectedSessionId
+                  ? selectedInspection
+                  : projectedInspection
+              }
             />
-          ) : (
-            <div key={editorSceneAnimKey}>
-              <TeacherBoardRuntime
-                scene={currentTeacherScene}
-                currentSceneIndex={teacherRun?.current_scene_index ?? 0}
-                lessonSceneCount={teacherLesson?.scenes.length ?? 0}
-                highestUnlockedSceneIndex={(teacherRun?.highest_unlocked_scene_index ?? 0) + 1}
-                participants={teacherRun?.participants ?? []}
-                projectedInspection={
-                  projectedSessionId && selectedInspection?.participant.session_id === projectedSessionId
-                    ? selectedInspection
-                    : projectedInspection
-                }
-              />
-            </div>
-          )}
+          </div>
         </section>
       </div>
     </section>

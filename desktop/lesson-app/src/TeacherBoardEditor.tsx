@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { LessonSceneCanvas } from './LessonSceneCanvas'
+import type { Editor, TLEditorSnapshot } from 'tldraw'
 import type { Scene, Widget } from './lessonRuntimeModels'
+import { layoutSnapshotToTldraw, snapshotForLessonPersistence, TeacherTldrawBoard } from './teacherTldrawBoard'
+import { TEACH_EYE_WIDGET_SHAPE_TYPE } from './teachEyeWidgetShape'
 import {
   buildSceneLayout,
-  createBoardElementId,
   defaultWidgetLayout,
   nextLayer,
   normalizeSceneLayout,
@@ -16,6 +17,16 @@ import {
 } from './sceneLayout'
 
 const DEBUG_BOARD_AGENT_LOGS = false
+
+const SCENE_DETAILS_STORAGE_KEY = 'teachereye.editor.scenePanelExpanded'
+
+function readSceneDetailsOpen(): boolean {
+  try {
+    return localStorage.getItem(SCENE_DETAILS_STORAGE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 type EditableLesson = {
   id: number
@@ -31,65 +42,7 @@ type EditableLesson = {
   scenes: Scene[]
 }
 
-type EditorTool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'text' | 'rectangle' | 'arrow'
 type Selection = { kind: 'widget'; id: number } | { kind: 'element'; id: string } | null
-
-type DragState =
-  | {
-      mode: 'move-widget'
-      widgetId: number
-      startX: number
-      startY: number
-      layout: WidgetLayout
-    }
-  | {
-      mode: 'move-element'
-      elementId: string
-      startX: number
-      startY: number
-      element: BoardElement
-    }
-  | {
-      mode: 'resize-widget'
-      widgetId: number
-      startX: number
-      startY: number
-      layout: WidgetLayout
-    }
-  | {
-      mode: 'resize-element'
-      elementId: string
-      startX: number
-      startY: number
-      element: BoardElement
-    }
-  | {
-      mode: 'draw'
-      type: 'pen' | 'highlighter'
-      originX: number
-      originY: number
-      points: number[]
-    }
-  | {
-      mode: 'create-shape'
-      type: 'rectangle' | 'arrow'
-      originX: number
-      originY: number
-    }
-  | {
-      mode: 'erase'
-      pointerId: number
-    }
-
-const TOOL_OPTIONS: Array<{ id: EditorTool; label: string }> = [
-  { id: 'select', label: 'Выбор' },
-  { id: 'pen', label: 'Перо' },
-  { id: 'highlighter', label: 'Маркер' },
-  { id: 'eraser', label: 'Ластик' },
-  { id: 'text', label: 'Текст' },
-  { id: 'rectangle', label: 'Прямоуг.' },
-  { id: 'arrow', label: 'Стрелка' },
-]
 
 const WIDGET_LIBRARY: Array<{ type: string; label: string; config: Record<string, any> }> = [
   {
@@ -145,157 +98,8 @@ function safeParseJson(value: string) {
   }
 }
 
-function clamp(value: number, min: number, max = Number.POSITIVE_INFINITY) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function eventPoint(event: PointerEvent | ReactPointerEvent<HTMLElement>, host: HTMLElement) {
-  const bounds = host.getBoundingClientRect()
-  return {
-    x: event.clientX - bounds.left,
-    y: event.clientY - bounds.top,
-  }
-}
-
 function updateElementGeometry(element: BoardElement, patch: Partial<BoardElement>): BoardElement {
   return { ...element, ...patch } as BoardElement
-}
-
-function pointToSegmentDistance(pointX: number, pointY: number, startX: number, startY: number, endX: number, endY: number) {
-  const deltaX = endX - startX
-  const deltaY = endY - startY
-  if (deltaX === 0 && deltaY === 0) {
-    return Math.hypot(pointX - startX, pointY - startY)
-  }
-  const projection = ((pointX - startX) * deltaX + (pointY - startY) * deltaY) / (deltaX * deltaX + deltaY * deltaY)
-  const t = Math.max(0, Math.min(1, projection))
-  const projectedX = startX + deltaX * t
-  const projectedY = startY + deltaY * t
-  return Math.hypot(pointX - projectedX, pointY - projectedY)
-}
-
-function isPointInsideElement(element: BoardElement, point: { x: number; y: number }) {
-  return point.x >= element.x && point.x <= element.x + element.w && point.y >= element.y && point.y <= element.y + element.h
-}
-
-function splitStrokeAtPoint(
-  element: Extract<BoardElement, { type: 'pen' | 'highlighter' }>,
-  point: { x: number; y: number },
-  radius: number,
-): BoardElement[] {
-  const strokePoints = []
-  for (let index = 0; index < element.points.length; index += 2) {
-    strokePoints.push({ x: element.points[index], y: element.points[index + 1] })
-  }
-  if (strokePoints.length < 2) return [element]
-
-  const localPoint = { x: point.x - element.x, y: point.y - element.y }
-  const keptRuns: Array<Array<{ x: number; y: number }>> = []
-  let currentRun = [strokePoints[0]]
-  let erased = false
-
-  for (let index = 1; index < strokePoints.length; index += 1) {
-    const previous = strokePoints[index - 1]
-    const current = strokePoints[index]
-    const segmentTouched = pointToSegmentDistance(localPoint.x, localPoint.y, previous.x, previous.y, current.x, current.y) <= radius
-    if (segmentTouched) {
-      erased = true
-      if (currentRun.length >= 2) keptRuns.push(currentRun)
-      currentRun = [current]
-      continue
-    }
-    currentRun = [...currentRun, current]
-  }
-  if (currentRun.length >= 2) keptRuns.push(currentRun)
-  if (!erased) return [element]
-
-  return keptRuns.flatMap((run) => {
-    if (run.length < 2) return []
-    const xs = run.map((entry) => entry.x)
-    const ys = run.map((entry) => entry.y)
-    const minX = Math.min(...xs)
-    const minY = Math.min(...ys)
-    const maxX = Math.max(...xs)
-    const maxY = Math.max(...ys)
-    return [
-      {
-        ...element,
-        id: createBoardElementId(element.type),
-        x: element.x + minX,
-        y: element.y + minY,
-        w: Math.max(1, maxX - minX),
-        h: Math.max(1, maxY - minY),
-        points: run.flatMap((entry) => [entry.x - minX, entry.y - minY]),
-      },
-    ]
-  })
-}
-
-function renderTempElement(element: BoardElement) {
-  if (element.type === 'text') {
-    return <div className="lesson-scene-text">{element.text}</div>
-  }
-  if (element.type === 'rectangle') {
-    return (
-      <div
-        className="lesson-scene-rect"
-        style={{
-          borderColor: element.color,
-          background: element.fill,
-          borderWidth: element.strokeWidth,
-          borderRadius: element.radius,
-        }}
-      />
-    )
-  }
-  if (element.type === 'arrow') {
-    const startX = element.flipX ? element.w : 0
-    const startY = element.flipY ? element.h : 0
-    const endX = element.flipX ? 0 : element.w
-    const endY = element.flipY ? 0 : element.h
-    const headSize = Math.max(10, element.strokeWidth * 3)
-    const directionX = endX >= startX ? -1 : 1
-    const directionY = endY >= startY ? -1 : 1
-    return (
-      <svg width={element.w} height={element.h} viewBox={`0 0 ${element.w} ${element.h}`} preserveAspectRatio="none">
-        <line
-          x1={startX}
-          y1={startY}
-          x2={endX}
-          y2={endY}
-          stroke={element.color}
-          strokeWidth={element.strokeWidth}
-          strokeLinecap="round"
-        />
-        <polygon
-          points={`${endX},${endY} ${endX + directionX * headSize},${endY + directionY * (headSize / 2)} ${endX + directionX * (headSize / 2)},${endY + directionY * headSize}`}
-          fill={element.color}
-        />
-      </svg>
-    )
-  }
-  return (
-    <svg width={element.w} height={element.h} viewBox={`0 0 ${element.w} ${element.h}`}>
-      <polyline
-        fill="none"
-        points={element.points.join(' ')}
-        stroke={element.color}
-        strokeWidth={element.strokeWidth}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity={element.opacity}
-      />
-    </svg>
-  )
-}
-
-function renderEditorWidgetPreview(widget: Widget) {
-  return (
-    <div className="board-widget-card">
-      <div className="card-title">{widget.title || widget.widget_type}</div>
-      <div className="info-text">{widget.widget_type}</div>
-    </div>
-  )
 }
 
 export function TeacherBoardEditor({
@@ -315,22 +119,36 @@ export function TeacherBoardEditor({
   saving: boolean
   dirty: boolean
 }) {
-  const [tool, setTool] = useState<EditorTool>('select')
   const [selected, setSelected] = useState<Selection>(null)
+  const [sceneDetailsOpen, setSceneDetailsOpen] = useState(readSceneDetailsOpen)
   const [widgetType, setWidgetType] = useState(WIDGET_LIBRARY[0].type)
   const [widgetConfigDraft, setWidgetConfigDraft] = useState('{}')
   const [widgetConfigError, setWidgetConfigError] = useState<string | null>(null)
-  const [tempDrawElement, setTempDrawElement] = useState<BoardElement | null>(null)
-  const [editingTextElementId, setEditingTextElementId] = useState<string | null>(null)
-  const [editingTextDraft, setEditingTextDraft] = useState('')
   const scene = lesson?.scenes[sceneIndex] ?? null
   const sceneLayout = useMemo(() => normalizeSceneLayout(scene?.layout), [scene?.layout])
-  const dragStateRef = useRef<DragState | null>(null)
-  const canvasHostRef = useRef<HTMLElement | null>(null)
+  const prevSceneIndexForTldrawRef = useRef(sceneIndex)
+  const tldrawSceneNavGenRef = useRef(0)
+  const tldrawEditorRef = useRef<Editor | null>(null)
+  const tldrawMountCacheRef = useRef<{ key: string; snap: ReturnType<typeof layoutSnapshotToTldraw> }>({
+    key: '',
+    snap: undefined,
+  })
+  if (prevSceneIndexForTldrawRef.current !== sceneIndex) {
+    tldrawSceneNavGenRef.current += 1
+    prevSceneIndexForTldrawRef.current = sceneIndex
+  }
+  const tldrawSceneMountKey =
+    lesson && scene ? `${lesson.id}-${scene.id}-${sceneIndex}-g${tldrawSceneNavGenRef.current}` : 'none'
+  if (tldrawMountCacheRef.current.key !== tldrawSceneMountKey) {
+    tldrawMountCacheRef.current = {
+      key: tldrawSceneMountKey,
+      snap: layoutSnapshotToTldraw(sceneLayout.tldraw_snapshot),
+    }
+  }
+  const tldrawInitialSnapshot = lesson && scene ? tldrawMountCacheRef.current.snap : undefined
   const lessonRef = useRef(lesson)
   const sceneRef = useRef(scene)
   const sceneLayoutRef = useRef(sceneLayout)
-  const tempDrawElementRef = useRef<BoardElement | null>(null)
   const selectedWidget = useMemo(
     () => (selected?.kind === 'widget' ? scene?.widgets.find((widget) => widget.id === selected.id) ?? null : null),
     [scene?.widgets, selected],
@@ -344,8 +162,7 @@ export function TeacherBoardEditor({
     lessonRef.current = lesson
     sceneRef.current = scene
     sceneLayoutRef.current = sceneLayout
-    tempDrawElementRef.current = tempDrawElement
-  }, [lesson, scene, sceneLayout, tempDrawElement])
+  }, [lesson, scene, sceneLayout])
 
   useEffect(() => {
     if (!DEBUG_BOARD_AGENT_LOGS) return
@@ -390,8 +207,6 @@ export function TeacherBoardEditor({
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setSelected(null)
-      setEditingTextElementId(null)
-      setEditingTextDraft('')
     }, 0)
     return () => window.clearTimeout(timer)
   }, [sceneIndex, lesson?.id])
@@ -414,6 +229,52 @@ export function TeacherBoardEditor({
       }),
     )
   }, [lesson, patchLessonScenes, scene, sceneIndex])
+
+  const handleTldrawWidgetSelect = useCallback((widgetId: number | null) => {
+    setSelected(widgetId ? { kind: 'widget', id: widgetId } : null)
+  }, [])
+
+  const handleTldrawPersist = useCallback(
+    (payload: { snapshot: TLEditorSnapshot; widgets: Widget[] }) => {
+      patchCurrentScene((currentScene, layout) => ({
+        ...currentScene,
+        widgets: payload.widgets,
+        layout: buildSceneLayout({
+          ...layout,
+          tldraw_snapshot: snapshotForLessonPersistence(payload.snapshot),
+        }),
+      }))
+    },
+    [patchCurrentScene],
+  )
+
+  const mirrorWidgetIntoTldraw = useCallback((widget: Widget, orderIndex: number) => {
+    const editor = tldrawEditorRef.current
+    if (!editor) return
+    const layout = normalizeWidgetLayout(widget.layout, orderIndex)
+    const targets = editor.getCurrentPageShapes().filter((s) => {
+      const sh = s as unknown as { type: string; props: { widgetId: number } }
+      return sh.type === TEACH_EYE_WIDGET_SHAPE_TYPE && sh.props.widgetId === widget.id
+    })
+    for (const shape of targets) {
+      editor.updateShapes([
+        {
+          id: shape.id,
+          type: TEACH_EYE_WIDGET_SHAPE_TYPE as never,
+          x: layout.x,
+          y: layout.y,
+          props: {
+            ...(shape as unknown as { props: Record<string, unknown> }).props,
+            w: layout.w,
+            h: layout.h,
+            title: widget.title,
+            widgetType: widget.widget_type,
+            configJson: JSON.stringify(widget.config ?? {}),
+          },
+        } as never,
+      ])
+    }
+  }, [])
 
   const patchBoardElements = useCallback((mutator: (elements: BoardElement[], layout: SceneBoardLayout) => BoardElement[]) => {
     patchCurrentScene((currentScene, currentLayout) => ({
@@ -439,36 +300,6 @@ export function TeacherBoardEditor({
     }))
   }, [patchCurrentScene])
 
-  const eraseAtPoint = useCallback((point: { x: number; y: number }) => {
-    patchBoardElements((elements) =>
-      elements.flatMap((element) => {
-        if (element.type === 'pen' || element.type === 'highlighter') {
-          return splitStrokeAtPoint(element, point, 18)
-        }
-        return isPointInsideElement(element, point) ? [] : [element]
-      }),
-    )
-  }, [patchBoardElements])
-
-  const commitTextEditing = useCallback(() => {
-    if (!editingTextElementId) return
-    const nextText = editingTextDraft.trim() ? editingTextDraft : 'Новый текст'
-    patchBoardElements((elements) =>
-      elements.map((element) =>
-        element.id === editingTextElementId && element.type === 'text'
-          ? { ...element, text: nextText }
-          : element,
-      ),
-    )
-    setEditingTextElementId(null)
-    setEditingTextDraft('')
-  }, [editingTextDraft, editingTextElementId, patchBoardElements])
-
-  const cancelTextEditing = useCallback(() => {
-    setEditingTextElementId(null)
-    setEditingTextDraft('')
-  }, [])
-
   function addScene() {
     if (!lesson) return
     const nextIndex = lesson.scenes.length
@@ -491,9 +322,19 @@ export function TeacherBoardEditor({
     if (!scene || !selected) return
     if (selected.kind === 'element') {
       patchBoardElements((elements) => elements.filter((element) => element.id !== selected.id))
-      if (editingTextElementId === selected.id) cancelTextEditing()
       setSelected(null)
       return
+    }
+    const editor = tldrawEditorRef.current
+    if (editor) {
+      const shapeIds = editor
+        .getCurrentPageShapes()
+        .filter((s) => {
+          const sh = s as unknown as { type: string; props: { widgetId: number } }
+          return sh.type === TEACH_EYE_WIDGET_SHAPE_TYPE && sh.props.widgetId === selected.id
+        })
+        .map((s) => s.id)
+      if (shapeIds.length) editor.deleteShapes(shapeIds)
     }
     patchCurrentScene((currentScene) => ({
       ...currentScene,
@@ -525,372 +366,15 @@ export function TeacherBoardEditor({
         ),
       }
     })
-  }
-
-  function handleCanvasPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    canvasHostRef.current = event.currentTarget
-    event.currentTarget.setPointerCapture?.(event.pointerId)
-    if (!lesson || !scene) return
-    const point = eventPoint(event, event.currentTarget)
-
-    if (tool === 'select') {
-      if (editingTextElementId) commitTextEditing()
-      setSelected(null)
-      return
-    }
-
-    if (tool === 'eraser') {
-      dragStateRef.current = { mode: 'erase', pointerId: event.pointerId }
-      eraseAtPoint(point)
-      setSelected(null)
-      return
-    }
-
-    if (tool === 'text') {
-      const layout = normalizeSceneLayout(scene.layout)
-      const element: BoardElement = {
-        id: createBoardElementId('text'),
-        type: 'text',
-        x: point.x,
-        y: point.y,
-        w: 320,
-        h: 120,
-        z: nextLayer(layout.board_elements),
-        locked: false,
-        text: 'Новый текст',
-        color: '#f5f8ff',
-        fontSize: 30,
-        align: 'left',
-      }
-      patchBoardElements((elements) => [...elements, element])
-      setSelected({ kind: 'element', id: element.id })
-      setEditingTextElementId(element.id)
-      setEditingTextDraft(element.text)
-      setTool('select')
-      return
-    }
-
-    if (tool === 'rectangle' || tool === 'arrow') {
-      dragStateRef.current = {
-        mode: 'create-shape',
-        type: tool,
-        originX: point.x,
-        originY: point.y,
-      }
-      const layer = nextLayer(sceneLayout.board_elements)
-      const element: BoardElement = tool === 'rectangle'
-        ? {
-            id: createBoardElementId('rect'),
-            type: 'rectangle',
-            x: point.x,
-            y: point.y,
-            w: 1,
-            h: 1,
-            z: layer,
-            locked: false,
-            color: '#76acff',
-            fill: 'rgba(118, 172, 255, 0.14)',
-            strokeWidth: 3,
-            radius: 18,
-          }
-        : {
-            id: createBoardElementId('arrow'),
-            type: 'arrow',
-            x: point.x,
-            y: point.y,
-            w: 1,
-            h: 1,
-            z: layer,
-            locked: false,
-            color: '#ffc86f',
-            strokeWidth: 4,
-          }
-      setTempDrawElement(element)
-      return
-    }
-
-    if (tool === 'pen' || tool === 'highlighter') {
-      dragStateRef.current = {
-        mode: 'draw',
-        type: tool,
-        originX: point.x,
-        originY: point.y,
-        points: [0, 0],
-      }
-      const element: BoardElement = {
-        id: createBoardElementId(tool),
-        type: tool,
-        x: point.x,
-        y: point.y,
-        w: 1,
-        h: 1,
-        z: nextLayer(sceneLayout.board_elements),
-        locked: false,
-        color: tool === 'highlighter' ? '#f7e588' : '#7bc6ff',
-        strokeWidth: tool === 'highlighter' ? 18 : 4,
-        opacity: tool === 'highlighter' ? 0.35 : 1,
-        points: [0, 0],
-      }
-      setTempDrawElement(element)
+    const editor = tldrawEditorRef.current
+    if (editor) {
+      const shapes = editor.getCurrentPageShapes().filter((s) => {
+        const sh = s as unknown as { type: string; props: { widgetId: number } }
+        return sh.type === TEACH_EYE_WIDGET_SHAPE_TYPE && sh.props.widgetId === selected.id
+      })
+      if (shapes.length) editor.bringToFront(shapes.map((s) => s.id))
     }
   }
-
-  function handleWidgetPointerDown(widgetId: number, event: ReactPointerEvent<HTMLDivElement>) {
-    event.currentTarget.setPointerCapture?.(event.pointerId)
-    if (tool === 'eraser') {
-      setSelected({ kind: 'widget', id: widgetId })
-      removeSelected()
-      return
-    }
-    if (tool !== 'select' || !scene) return
-    const widget = scene.widgets.find((item) => item.id === widgetId)
-    if (!widget) return
-    const layout = normalizeWidgetLayout(widget.layout, scene.widgets.indexOf(widget))
-    if (layout.locked) {
-      setSelected({ kind: 'widget', id: widgetId })
-      return
-    }
-    canvasHostRef.current = event.currentTarget.closest('.lesson-scene-canvas') as HTMLElement | null
-    dragStateRef.current = {
-      mode: 'move-widget',
-      widgetId,
-      startX: event.clientX,
-      startY: event.clientY,
-      layout,
-    }
-    setSelected({ kind: 'widget', id: widgetId })
-  }
-
-  function handleElementPointerDown(elementId: string, event: ReactPointerEvent<HTMLDivElement>) {
-    event.currentTarget.setPointerCapture?.(event.pointerId)
-    if (!scene) return
-    const element = sceneLayout.board_elements.find((item) => item.id === elementId)
-    if (!element) return
-    if (tool === 'eraser') {
-      const point = eventPoint(event, (event.currentTarget.closest('.lesson-scene-canvas') as HTMLElement | null) ?? event.currentTarget)
-      dragStateRef.current = { mode: 'erase', pointerId: event.pointerId }
-      eraseAtPoint(point)
-      setSelected(null)
-      return
-    }
-    if (tool !== 'select' || element.locked) {
-      setSelected({ kind: 'element', id: elementId })
-      return
-    }
-    canvasHostRef.current = event.currentTarget.closest('.lesson-scene-canvas') as HTMLElement | null
-    dragStateRef.current = {
-      mode: 'move-element',
-      elementId,
-      startX: event.clientX,
-      startY: event.clientY,
-      element,
-    }
-    setSelected({ kind: 'element', id: elementId })
-  }
-
-  function beginResizeSelection(event: ReactPointerEvent<HTMLButtonElement>) {
-    event.stopPropagation()
-    event.currentTarget.setPointerCapture?.(event.pointerId)
-    if (!selected || !scene) return
-    const canvas = (event.currentTarget.closest('.lesson-scene-canvas') as HTMLElement | null) ?? canvasHostRef.current
-    canvasHostRef.current = canvas
-    if (selected.kind === 'widget') {
-      const widget = scene.widgets.find((item) => item.id === selected.id)
-      if (!widget) return
-      dragStateRef.current = {
-        mode: 'resize-widget',
-        widgetId: selected.id,
-        startX: event.clientX,
-        startY: event.clientY,
-        layout: normalizeWidgetLayout(widget.layout, scene.widgets.indexOf(widget)),
-      }
-      return
-    }
-    if (!selectedElement) return
-    dragStateRef.current = {
-      mode: 'resize-element',
-      elementId: selected.id,
-      startX: event.clientX,
-      startY: event.clientY,
-      element: selectedElement,
-    }
-  }
-
-  useEffect(() => {
-    function onPointerMove(event: PointerEvent) {
-      const drag = dragStateRef.current
-      const activeLesson = lessonRef.current
-      const activeScene = sceneRef.current
-      const activeLayout = sceneLayoutRef.current
-      if (!drag || !activeLesson || !activeScene) return
-      if (drag.mode === 'move-widget') {
-        const deltaX = event.clientX - drag.startX
-        const deltaY = event.clientY - drag.startY
-        patchWidget(drag.widgetId, (widget, layout) => ({
-          ...widget,
-          layout: {
-            ...layout,
-            x: clamp(drag.layout.x + deltaX, 0),
-            y: clamp(drag.layout.y + deltaY, 0),
-          },
-        }))
-        return
-      }
-      if (drag.mode === 'move-element') {
-        const deltaX = event.clientX - drag.startX
-        const deltaY = event.clientY - drag.startY
-        patchBoardElements((elements) =>
-          elements.map((element) =>
-            element.id === drag.elementId
-              ? updateElementGeometry(element, {
-                  x: clamp(drag.element.x + deltaX, 0),
-                  y: clamp(drag.element.y + deltaY, 0),
-                })
-              : element,
-          ),
-        )
-        return
-      }
-      if (drag.mode === 'resize-widget') {
-        const deltaX = event.clientX - drag.startX
-        const deltaY = event.clientY - drag.startY
-        patchWidget(drag.widgetId, (widget, layout) => ({
-          ...widget,
-          layout: {
-            ...layout,
-            w: clamp(drag.layout.w + deltaX, 180),
-            h: clamp(drag.layout.h + deltaY, 120),
-          },
-        }))
-        return
-      }
-      if (drag.mode === 'resize-element') {
-        const deltaX = event.clientX - drag.startX
-        const deltaY = event.clientY - drag.startY
-        patchBoardElements((elements) =>
-          elements.map((element) =>
-            element.id === drag.elementId
-              ? updateElementGeometry(element, {
-                  w: clamp(drag.element.w + deltaX, 24),
-                  h: clamp(drag.element.h + deltaY, 24),
-                })
-              : element,
-          ),
-        )
-        return
-      }
-      if (drag.mode === 'erase') {
-        const canvas = canvasHostRef.current
-        if (!canvas) return
-        eraseAtPoint(eventPoint(event, canvas))
-        return
-      }
-      if (drag.mode === 'create-shape') {
-        const canvas = canvasHostRef.current
-        if (!canvas) return
-        const point = eventPoint(event, canvas)
-        const minX = Math.min(drag.originX, point.x)
-        const minY = Math.min(drag.originY, point.y)
-        const width = Math.max(1, Math.abs(point.x - drag.originX))
-        const height = Math.max(1, Math.abs(point.y - drag.originY))
-        const element: BoardElement = drag.type === 'rectangle'
-          ? {
-              id: tempDrawElementRef.current?.id ?? createBoardElementId('rect'),
-              type: 'rectangle',
-              x: minX,
-              y: minY,
-              w: width,
-              h: height,
-              z: tempDrawElementRef.current?.z ?? nextLayer(activeLayout.board_elements),
-              locked: false,
-              color: '#76acff',
-              fill: 'rgba(118, 172, 255, 0.14)',
-              strokeWidth: 3,
-              radius: 18,
-            }
-          : {
-              id: tempDrawElementRef.current?.id ?? createBoardElementId('arrow'),
-              type: 'arrow',
-              x: minX,
-              y: minY,
-              w: width,
-              h: height,
-              z: tempDrawElementRef.current?.z ?? nextLayer(activeLayout.board_elements),
-              locked: false,
-              color: '#ffc86f',
-              strokeWidth: 4,
-              flipX: point.x < drag.originX,
-              flipY: point.y < drag.originY,
-            }
-        tempDrawElementRef.current = element
-        setTempDrawElement(element)
-        return
-      }
-      if (drag.mode === 'draw') {
-        const canvas = canvasHostRef.current
-        if (!canvas) return
-        const point = eventPoint(event, canvas)
-        const absolutePoints = [...drag.points, point.x - drag.originX, point.y - drag.originY]
-        const xs = absolutePoints.filter((_, index) => index % 2 === 0)
-        const ys = absolutePoints.filter((_, index) => index % 2 === 1)
-        const minX = Math.min(...xs, 0)
-        const minY = Math.min(...ys, 0)
-        const maxX = Math.max(...xs, 1)
-        const maxY = Math.max(...ys, 1)
-        const normalizedPoints = absolutePoints.flatMap((value, index) =>
-          index % 2 === 0 ? [value - minX] : [value - minY],
-        )
-        const element: BoardElement = {
-          id: tempDrawElementRef.current?.id ?? createBoardElementId(drag.type),
-          type: drag.type,
-          x: drag.originX + minX,
-          y: drag.originY + minY,
-          w: maxX - minX || 1,
-          h: maxY - minY || 1,
-          z: tempDrawElementRef.current?.z ?? nextLayer(activeLayout.board_elements),
-          locked: false,
-          color: drag.type === 'highlighter' ? '#f7e588' : '#7bc6ff',
-          strokeWidth: drag.type === 'highlighter' ? 18 : 4,
-          opacity: drag.type === 'highlighter' ? 0.35 : 1,
-          points: normalizedPoints,
-        }
-        dragStateRef.current = { ...drag, points: absolutePoints }
-        tempDrawElementRef.current = element
-        setTempDrawElement(element)
-      }
-    }
-
-    function onPointerUp() {
-      const drag = dragStateRef.current
-      const nextElement = tempDrawElementRef.current
-      if ((drag?.mode === 'draw' || drag?.mode === 'create-shape') && nextElement) {
-        patchBoardElements((elements) => [...elements, nextElement])
-        setSelected({ kind: 'element', id: nextElement.id })
-        if (drag.mode === 'create-shape') setTool('select')
-      }
-      dragStateRef.current = null
-      tempDrawElementRef.current = null
-      setTempDrawElement(null)
-    }
-
-    window.addEventListener('pointermove', onPointerMove)
-    window.addEventListener('pointerup', onPointerUp)
-    return () => {
-      window.removeEventListener('pointermove', onPointerMove)
-      window.removeEventListener('pointerup', onPointerUp)
-    }
-  }, [eraseAtPoint, patchBoardElements, patchWidget])
-
-  const selectionBox = useMemo(() => {
-    if (!selected) return null
-    if (selected.kind === 'widget' && selectedWidget) {
-      return normalizeWidgetLayout(selectedWidget.layout, scene?.widgets.indexOf(selectedWidget) ?? 0)
-    }
-    if (selected.kind === 'element' && selectedElement) {
-      return selectedElement
-    }
-    return null
-  }, [scene?.widgets, selected, selectedElement, selectedWidget])
 
   function addWidget() {
     if (!scene) return
@@ -915,16 +399,21 @@ export function TeacherBoardEditor({
   }
 
   function updateSelectedWidgetField(patch: Partial<Widget>) {
-    if (!selectedWidget) return
+    if (!selectedWidget || !scene) return
+    const idx = scene.widgets.indexOf(selectedWidget)
     patchWidget(selectedWidget.id, (widget) => ({ ...widget, ...patch }))
+    mirrorWidgetIntoTldraw({ ...selectedWidget, ...patch }, idx)
   }
 
   function updateSelectedWidgetLayout(patch: Partial<WidgetLayout>) {
     if (!selectedWidget || !scene) return
-    patchWidget(selectedWidget.id, (widget, layout) => ({
+    const idx = scene.widgets.indexOf(selectedWidget)
+    const layout = { ...normalizeWidgetLayout(selectedWidget.layout, idx), ...patch }
+    patchWidget(selectedWidget.id, (widget, prevLayout) => ({
       ...widget,
-      layout: { ...layout, ...patch },
+      layout: { ...prevLayout, ...patch },
     }))
+    mirrorWidgetIntoTldraw({ ...selectedWidget, layout }, idx)
   }
 
   function updateSelectedElement(patch: Partial<BoardElement>) {
@@ -934,371 +423,400 @@ export function TeacherBoardEditor({
     )
   }
 
-  function beginTextEditing(elementId: string) {
-    const element = sceneLayout.board_elements.find((entry) => entry.id === elementId)
-    if (!element || element.type !== 'text') return
-    setSelected({ kind: 'element', id: elementId })
-    setEditingTextElementId(elementId)
-    setEditingTextDraft(element.text)
-  }
-
   function applyWidgetConfigDraft() {
-    if (!selectedWidget) return
+    if (!selectedWidget || !scene) return
     const parsed = safeParseJson(widgetConfigDraft)
     if (!parsed.ok || typeof parsed.value !== 'object' || parsed.value === null || Array.isArray(parsed.value)) {
       setWidgetConfigError(parsed.ok ? 'Нужен JSON-объект' : parsed.error)
       return
     }
+    const idx = scene.widgets.indexOf(selectedWidget)
     patchWidget(selectedWidget.id, (widget) => ({ ...widget, config: parsed.value as Record<string, any> }))
+    mirrorWidgetIntoTldraw({ ...selectedWidget, config: parsed.value as Record<string, any> }, idx)
     setWidgetConfigError(null)
   }
+
+  const selectionSummary = selectedWidget
+    ? `Виджет • ${selectedWidget.title || selectedWidget.widget_type}`
+    : selectedElement
+      ? `Элемент • ${
+          selectedElement.type === 'text'
+            ? 'Текст'
+            : selectedElement.type === 'rectangle'
+              ? 'Прямоугольник'
+              : selectedElement.type === 'arrow'
+                ? 'Стрелка'
+                : selectedElement.type === 'highlighter'
+                  ? 'Маркер'
+                  : 'Линия'
+        }`
+      : 'Ничего не выбрано'
 
   if (!lesson || !scene) {
     return <div className="empty-state">Выбери урок из библиотеки, чтобы открыть editor canvas.</div>
   }
-
-  const previewWidgets = scene.widgets.map((widget, index) => ({
-    id: widget.id,
-    layout: normalizeWidgetLayout(widget.layout, index),
-    selected: selected?.kind === 'widget' && selected.id === widget.id,
-    className: 'teacher-editor-widget',
-    onClick: () => setSelected({ kind: 'widget', id: widget.id }),
-    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => handleWidgetPointerDown(widget.id, event),
-    content: renderEditorWidgetPreview(widget),
-  }))
-
-  const overlay = (
-    <>
-      {editingTextElementId && selectedElement?.type === 'text' ? (
-        <div
-          className="teacher-editor-text-edit"
-          style={{
-            left: selectedElement.x,
-            top: selectedElement.y,
-            width: selectedElement.w,
-            minHeight: selectedElement.h,
-            zIndex: selectedElement.z + 120,
-          }}
-        >
-          <textarea
-            autoFocus
-            value={editingTextDraft}
-            onChange={(event) => setEditingTextDraft(event.target.value)}
-            onBlur={commitTextEditing}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                event.preventDefault()
-                cancelTextEditing()
-              }
-              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-                event.preventDefault()
-                commitTextEditing()
-              }
-            }}
-          />
-        </div>
-      ) : null}
-      {tempDrawElement ? (
-        <div
-          className="lesson-scene-element selected"
-          style={{
-            left: tempDrawElement.x,
-            top: tempDrawElement.y,
-            width: tempDrawElement.w,
-            height: tempDrawElement.h,
-            zIndex: tempDrawElement.z,
-          }}
-        >
-          {renderTempElement(tempDrawElement)}
-        </div>
-      ) : null}
-      {selectionBox ? (
-        <div
-          className="teacher-editor-selection"
-          style={{
-            left: selectionBox.x,
-            top: selectionBox.y,
-            width: selectionBox.w,
-            height: selectionBox.h,
-            zIndex: selectionBox.z + 100,
-          }}
-        >
-          <button className="teacher-editor-resize-handle" onPointerDown={beginResizeSelection} />
-        </div>
-      ) : null}
-    </>
-  )
-
+  // #region agent log
+  fetch('http://127.0.0.1:7711/ingest/ea4dba9c-75d7-4a3b-928e-7c8b2a9adba1', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ac6ffd' },
+    body: JSON.stringify({
+      sessionId: 'ac6ffd',
+      runId: 'dbg-board',
+      hypothesisId: 'H3',
+      location: 'TeacherBoardEditor.tsx:render-board',
+      message: 'editor render with tldraw',
+      data: {
+        sceneMountKey: tldrawSceneMountKey,
+        hasSnapshot: Boolean(tldrawInitialSnapshot),
+        widgetCount: scene.widgets.length,
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {})
+  // #endregion
   return (
-    <div className="teacher-editor-shell">
-      <div className="teacher-editor-toolbar">
-        <div className="teacher-editor-tool-group">
-          {TOOL_OPTIONS.map((option) => (
-            <button
-              key={option.id}
-              className={tool === option.id ? 'active' : 'ghost'}
-              onClick={() => setTool(option.id)}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-        <div className="teacher-editor-tool-group">
-          <select value={widgetType} onChange={(event) => setWidgetType(event.target.value)}>
-            {WIDGET_LIBRARY.map((entry) => (
-              <option key={entry.type} value={entry.type}>
-                {entry.label}
-              </option>
-            ))}
-          </select>
-          <button className="ghost" onClick={addWidget}>
-            Добавить виджет
-          </button>
-          <button className="ghost" onClick={removeSelected} disabled={!selected}>
-            Удалить
-          </button>
-          <button className="ghost" onClick={bringSelectionToFront} disabled={!selected}>
-            На передний план
-          </button>
-        </div>
-        <div className="teacher-editor-tool-group">
-          <button onClick={onSave} disabled={saving}>
-            {saving ? 'Сохраняю...' : dirty ? 'Сохранить урок' : 'Сохранено'}
-          </button>
-        </div>
-      </div>
-
-      <div className="teacher-editor-meta">
-        <div className="teacher-editor-scene-strip">
-          {lesson.scenes.map((item, index) => (
-            <button
-              key={item.id}
-              className={`scene-chip ${index === sceneIndex ? 'current' : ''}`}
-              onClick={() => onSceneIndexChange(index)}
-            >
-              {index + 1}. {item.title}
-            </button>
-          ))}
-          <button className="ghost" onClick={addScene}>
-            + сцена
-          </button>
-        </div>
-        <div className="info-text">
-          Сохранение меняет шаблон урока. Уже запущенный live-run продолжит жить на своем snapshot, пока ты не перезапустишь урок.
-        </div>
-      </div>
-
-      <div className="teacher-editor-grid">
-        <div className="teacher-editor-canvas-card">
-          <LessonSceneCanvas
-            rawLayout={scene.layout}
-            mode="teacher-edit"
-            widgets={previewWidgets}
-            selectedElementId={selected?.kind === 'element' ? selected.id : null}
-            selectedWidgetId={selected?.kind === 'widget' ? selected.id : null}
-            onSelectElement={(elementId) => setSelected({ kind: 'element', id: elementId })}
-            onElementDoubleClick={beginTextEditing}
-            onElementPointerDown={handleElementPointerDown}
-            onCanvasPointerDown={handleCanvasPointerDown}
-            onCanvasClick={() => {
-              if (editingTextElementId) commitTextEditing()
-              if (tool === 'select') setSelected(null)
+    <div className="teacher-editor-shell teacher-editor-shell-overlay">
+      <div className="teacher-editor-canvas-card teacher-editor-canvas-card-full teacher-editor-canvas-card-overlay">
+        <div className="teacher-editor-board-stage teacher-editor-hud-root">
+          <TeacherTldrawBoard
+            sceneMountKey={tldrawSceneMountKey}
+            initialSnapshot={tldrawInitialSnapshot}
+            widgets={scene.widgets}
+            onPersist={handleTldrawPersist}
+            onWidgetSelect={handleTldrawWidgetSelect}
+            onEditorReady={(ed) => {
+              tldrawEditorRef.current = ed
             }}
-            overlay={overlay}
-            className="teacher-editor-canvas-surface"
           />
-        </div>
 
-        <div className="teacher-editor-inspector">
-          <div className="card-title">Inspector</div>
-          <label className="field">
-            <span>Название сцены</span>
-            <input
-              value={scene.title}
-              onChange={(event) =>
-                patchCurrentScene((currentScene) => ({
-                  ...currentScene,
-                  title: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label className="field">
-            <span>Заметки сцены</span>
-            <textarea
-              value={scene.notes_text || ''}
-              rows={4}
-              onChange={(event) =>
-                patchCurrentScene((currentScene) => ({
-                  ...currentScene,
-                  notes_text: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <div className="teacher-editor-mini-grid">
-            <label className="field">
-              <span>Viewport W</span>
-              <input
-                type="number"
-                value={sceneLayout.viewport.width}
-                onChange={(event) =>
-                  patchCurrentScene((currentScene, layout) => ({
-                    ...currentScene,
-                    layout: buildSceneLayout({
-                      ...layout,
-                      viewport: { ...layout.viewport, width: Number(event.target.value) || layout.viewport.width },
-                    }),
-                  }))
-                }
-              />
-            </label>
-            <label className="field">
-              <span>Viewport H</span>
-              <input
-                type="number"
-                value={sceneLayout.viewport.height}
-                onChange={(event) =>
-                  patchCurrentScene((currentScene, layout) => ({
-                    ...currentScene,
-                    layout: buildSceneLayout({
-                      ...layout,
-                      viewport: { ...layout.viewport, height: Number(event.target.value) || layout.viewport.height },
-                    }),
-                  }))
-                }
-              />
-            </label>
+          <div className="teacher-editor-floating-stack teacher-editor-floating-top-left">
+            <div className="teacher-editor-menu-panel teacher-editor-floating-panel teacher-editor-hud-panel">
+              <div className="teacher-editor-panel-label">Навигация</div>
+              <div className="teacher-editor-hud-nav-block">
+                <h2 className="teacher-editor-hud-title-ellipsis" title={scene.title || `Сцена ${sceneIndex + 1}`}>
+                  {scene.title || `Сцена ${sceneIndex + 1}`}
+                </h2>
+                <div
+                  className="teacher-editor-hud-stats-line"
+                  title={`${lesson.scenes.length} сцен, ${scene.widgets.length} виджетов`}
+                >
+                  {lesson.scenes.length} сц · {scene.widgets.length} видж · {sceneLayout.viewport.width}×{sceneLayout.viewport.height}
+                  {sceneLayout.board_elements.length > 0 ? ` · leg.${sceneLayout.board_elements.length}` : null}
+                </div>
+                <div className="teacher-editor-hud-meta-line" title={selectionSummary}>
+                  {selectionSummary}
+                </div>
+              </div>
+              <div className="teacher-editor-scene-strip-compact teacher-editor-scene-strip-scroll">
+                {lesson.scenes.map((item, index) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`teacher-editor-scene-chip ${index === sceneIndex ? 'current' : ''}`}
+                    onClick={() => onSceneIndexChange(index)}
+                    title={`${index + 1}. ${item.title}`}
+                  >
+                    {index + 1}. {item.title}
+                  </button>
+                ))}
+                <button type="button" className="ghost teacher-editor-scene-strip-add" onClick={addScene} aria-label="Добавить новую сцену">
+                  +
+                </button>
+              </div>
+              <div className="teacher-editor-floating-actions">
+                <button
+                  type="button"
+                  onClick={onSave}
+                  disabled={saving}
+                  aria-label={
+                    saving
+                      ? 'Сохранение урока, подождите'
+                      : dirty
+                        ? 'Сохранить изменения урока на сервер'
+                        : 'Нет несохранённых изменений'
+                  }
+                >
+                  {saving ? 'Сохраняю...' : dirty ? 'Сохранить урок' : 'Сохранено'}
+                </button>
+              </div>
+            </div>
+
+            <div className="teacher-editor-menu-panel teacher-editor-floating-panel teacher-editor-hud-panel">
+              <div className="teacher-editor-panel-label">Сцена</div>
+              <label className="field teacher-editor-hud-field-tight">
+                <span>Название</span>
+                <input
+                  value={scene.title}
+                  onChange={(event) =>
+                    patchCurrentScene((currentScene) => ({
+                      ...currentScene,
+                      title: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <details
+                className="teacher-editor-hud-details"
+                open={sceneDetailsOpen}
+                onToggle={(event) => {
+                  const open = event.currentTarget.open
+                  setSceneDetailsOpen(open)
+                  try {
+                    localStorage.setItem(SCENE_DETAILS_STORAGE_KEY, open ? '1' : '0')
+                  } catch {
+                    /* ignore */
+                  }
+                }}
+              >
+                <summary className="teacher-editor-hud-details-summary">Заметки, размер холста и сетка</summary>
+                <div className="teacher-editor-inline-form teacher-editor-inline-form-floating teacher-editor-inline-form-hud">
+                  <label className="field teacher-editor-field-wide teacher-editor-hud-field-tight">
+                    <span>Заметки</span>
+                    <textarea
+                      value={scene.notes_text || ''}
+                      rows={3}
+                      onChange={(event) =>
+                        patchCurrentScene((currentScene) => ({
+                          ...currentScene,
+                          notes_text: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                  <div className="teacher-editor-hud-viewport-row">
+                    <label className="field teacher-editor-hud-field-tight">
+                      <span>Viewport W</span>
+                      <input
+                        type="number"
+                        value={sceneLayout.viewport.width}
+                        onChange={(event) =>
+                          patchCurrentScene((currentScene, layout) => ({
+                            ...currentScene,
+                            layout: buildSceneLayout({
+                              ...layout,
+                              viewport: { ...layout.viewport, width: Number(event.target.value) || layout.viewport.width },
+                            }),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="field teacher-editor-hud-field-tight">
+                      <span>Viewport H</span>
+                      <input
+                        type="number"
+                        value={sceneLayout.viewport.height}
+                        onChange={(event) =>
+                          patchCurrentScene((currentScene, layout) => ({
+                            ...currentScene,
+                            layout: buildSceneLayout({
+                              ...layout,
+                              viewport: { ...layout.viewport, height: Number(event.target.value) || layout.viewport.height },
+                            }),
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+                  <label className="field checkbox-field teacher-editor-field-checkbox teacher-editor-hud-field-tight teacher-editor-hud-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={sceneLayout.viewport.showGrid}
+                      onChange={(event) =>
+                        patchCurrentScene((currentScene, layout) => ({
+                          ...currentScene,
+                          layout: buildSceneLayout({
+                            ...layout,
+                            viewport: { ...layout.viewport, showGrid: event.target.checked },
+                          }),
+                        }))
+                      }
+                    />
+                    <span>Сетка</span>
+                  </label>
+                </div>
+              </details>
+            </div>
           </div>
-          <label className="field checkbox-field">
-            <input
-              type="checkbox"
-              checked={sceneLayout.viewport.showGrid}
-              onChange={(event) =>
-                patchCurrentScene((currentScene, layout) => ({
-                  ...currentScene,
-                  layout: buildSceneLayout({
-                    ...layout,
-                    viewport: { ...layout.viewport, showGrid: event.target.checked },
-                  }),
-                }))
-              }
-            />
-            <span>Показывать сетку</span>
-          </label>
 
-          {selectedWidget ? (
-            <>
-              <div className="teacher-editor-inspector-title">Виджет</div>
-              <label className="field">
-                <span>Заголовок</span>
-                <input value={selectedWidget.title || ''} onChange={(event) => updateSelectedWidgetField({ title: event.target.value })} />
-              </label>
-              <div className="teacher-editor-mini-grid">
-                {(['x', 'y', 'w', 'h', 'z'] as const).map((key) => (
-                  <label className="field" key={key}>
-                    <span>{key.toUpperCase()}</span>
+          <div className="teacher-editor-floating-stack teacher-editor-floating-top-right">
+            <div className="teacher-editor-menu-panel teacher-editor-floating-panel teacher-editor-hud-panel">
+              <div className="teacher-editor-panel-label">Виджеты</div>
+              <div className="teacher-editor-stage-actions teacher-editor-stage-actions-floating teacher-editor-hud-widgets-actions">
+                <select value={widgetType} onChange={(event) => setWidgetType(event.target.value)} aria-label="Тип нового виджета">
+                  {WIDGET_LIBRARY.map((entry) => (
+                    <option key={entry.type} value={entry.type}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" onClick={addWidget}>
+                  Добавить виджет
+                </button>
+                <div className="teacher-editor-hud-action-row">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={removeSelected}
+                    disabled={!selected}
+                    aria-label="Удалить выбранный виджет или элемент доски"
+                    title="Удалить выбранное"
+                  >
+                    Удалить
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={bringSelectionToFront}
+                    disabled={!selected}
+                    aria-label="Перенести выбранное на передний план"
+                    title="На передний план"
+                  >
+                    Вперёд
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {selectedWidget ? (
+              <div className="teacher-editor-menu-panel teacher-editor-floating-panel teacher-editor-floating-panel-selection teacher-editor-hud-panel">
+                <div className="teacher-editor-inspector-title">Виджет</div>
+                <div className="teacher-editor-inline-form teacher-editor-inline-form-floating teacher-editor-inline-form-hud">
+                  <label className="field teacher-editor-hud-field-tight">
+                    <span>Заголовок</span>
                     <input
-                      type="number"
-                      value={normalizeWidgetLayout(selectedWidget.layout, scene.widgets.indexOf(selectedWidget))[key]}
-                      onChange={(event) => updateSelectedWidgetLayout({ [key]: Number(event.target.value) || 0 })}
+                      value={selectedWidget.title || ''}
+                      onChange={(event) => updateSelectedWidgetField({ title: event.target.value })}
                     />
                   </label>
-                ))}
+                  <details className="teacher-editor-hud-details teacher-editor-hud-details-nested">
+                    <summary className="teacher-editor-hud-details-summary">Позиция и размер</summary>
+                    {(['x', 'y', 'w', 'h', 'z'] as const).map((key) => (
+                      <label className="field teacher-editor-hud-field-tight" key={key}>
+                        <span>{key.toUpperCase()}</span>
+                        <input
+                          type="number"
+                          value={normalizeWidgetLayout(selectedWidget.layout, scene.widgets.indexOf(selectedWidget))[key]}
+                          onChange={(event) => updateSelectedWidgetLayout({ [key]: Number(event.target.value) || 0 })}
+                        />
+                      </label>
+                    ))}
+                    <label className="field checkbox-field teacher-editor-field-checkbox teacher-editor-hud-field-tight teacher-editor-hud-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={normalizeWidgetLayout(selectedWidget.layout, scene.widgets.indexOf(selectedWidget)).locked}
+                        onChange={(event) => updateSelectedWidgetLayout({ locked: event.target.checked })}
+                      />
+                      <span>Закрепить</span>
+                    </label>
+                  </details>
+                  <details className="teacher-editor-hud-details teacher-editor-hud-details-nested">
+                    <summary className="teacher-editor-hud-details-summary">Config JSON</summary>
+                    <label className="field teacher-editor-field-wide teacher-editor-hud-field-tight">
+                      <textarea
+                        rows={4}
+                        value={widgetConfigDraft}
+                        onChange={(event) => setWidgetConfigDraft(event.target.value)}
+                        onBlur={applyWidgetConfigDraft}
+                      />
+                    </label>
+                  </details>
+                </div>
+                {widgetConfigError ? <div className="info-text error-text">{widgetConfigError}</div> : null}
               </div>
-              <label className="field checkbox-field">
-                <input
-                  type="checkbox"
-                  checked={normalizeWidgetLayout(selectedWidget.layout, scene.widgets.indexOf(selectedWidget)).locked}
-                  onChange={(event) => updateSelectedWidgetLayout({ locked: event.target.checked })}
-                />
-                <span>Locked</span>
-              </label>
-              <label className="field">
-                <span>Config JSON</span>
-                <textarea
-                  rows={12}
-                  value={widgetConfigDraft}
-                  onChange={(event) => setWidgetConfigDraft(event.target.value)}
-                  onBlur={applyWidgetConfigDraft}
-                />
-              </label>
-              {widgetConfigError ? <div className="info-text error-text">{widgetConfigError}</div> : null}
-            </>
-          ) : null}
+            ) : null}
 
-          {selectedElement ? (
-            <>
-              <div className="teacher-editor-inspector-title">Board element</div>
-              {'text' in selectedElement ? (
-                <label className="field">
-                  <span>Текст</span>
-                  <textarea
-                    rows={4}
-                    value={selectedElement.text}
-                    onChange={(event) => updateSelectedElement({ text: event.target.value })}
-                  />
-                </label>
-              ) : null}
-              <div className="teacher-editor-mini-grid">
-                {(['x', 'y', 'w', 'h', 'z'] as const).map((key) => (
-                  <label className="field" key={key}>
-                    <span>{key.toUpperCase()}</span>
-                    <input
-                      type="number"
-                      value={selectedElement[key]}
-                      onChange={(event) => updateSelectedElement({ [key]: Number(event.target.value) || 0 } as Partial<BoardElement>)}
-                    />
-                  </label>
-                ))}
+            {selectedElement ? (
+              <div className="teacher-editor-menu-panel teacher-editor-floating-panel teacher-editor-floating-panel-selection teacher-editor-hud-panel">
+                <div className="teacher-editor-inspector-title">Элемент (legacy)</div>
+                <div className="teacher-editor-inline-form teacher-editor-inline-form-floating teacher-editor-inline-form-hud">
+                  {'text' in selectedElement ? (
+                    <label className="field teacher-editor-field-wide teacher-editor-hud-field-tight">
+                      <span>Текст</span>
+                      <textarea
+                        rows={2}
+                        value={selectedElement.text}
+                        onChange={(event) => updateSelectedElement({ text: event.target.value })}
+                      />
+                    </label>
+                  ) : null}
+                  <details className="teacher-editor-hud-details teacher-editor-hud-details-nested">
+                    <summary className="teacher-editor-hud-details-summary">Позиция и размер</summary>
+                    {(['x', 'y', 'w', 'h', 'z'] as const).map((key) => (
+                      <label className="field teacher-editor-hud-field-tight" key={key}>
+                        <span>{key.toUpperCase()}</span>
+                        <input
+                          type="number"
+                          value={selectedElement[key]}
+                          onChange={(event) => updateSelectedElement({ [key]: Number(event.target.value) || 0 } as Partial<BoardElement>)}
+                        />
+                      </label>
+                    ))}
+                    <label className="field checkbox-field teacher-editor-field-checkbox teacher-editor-hud-field-tight teacher-editor-hud-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={selectedElement.locked}
+                        onChange={(event) => updateSelectedElement({ locked: event.target.checked })}
+                      />
+                      <span>Закрепить</span>
+                    </label>
+                  </details>
+                  {'color' in selectedElement ||
+                  'fontSize' in selectedElement ||
+                  'fill' in selectedElement ||
+                  'strokeWidth' in selectedElement ? (
+                    <details className="teacher-editor-hud-details teacher-editor-hud-details-nested">
+                      <summary className="teacher-editor-hud-details-summary">Оформление</summary>
+                      {'color' in selectedElement ? (
+                        <label className="field teacher-editor-hud-field-tight">
+                          <span>Цвет</span>
+                          <input value={selectedElement.color} onChange={(event) => updateSelectedElement({ color: event.target.value })} />
+                        </label>
+                      ) : null}
+                      {'fontSize' in selectedElement ? (
+                        <label className="field teacher-editor-hud-field-tight">
+                          <span>Размер текста</span>
+                          <input
+                            type="number"
+                            value={selectedElement.fontSize}
+                            onChange={(event) =>
+                              updateSelectedElement({ fontSize: Number(event.target.value) || selectedElement.fontSize })
+                            }
+                          />
+                        </label>
+                      ) : null}
+                      {'fill' in selectedElement ? (
+                        <label className="field teacher-editor-hud-field-tight">
+                          <span>Заливка</span>
+                          <input value={selectedElement.fill} onChange={(event) => updateSelectedElement({ fill: event.target.value })} />
+                        </label>
+                      ) : null}
+                      {'strokeWidth' in selectedElement ? (
+                        <label className="field teacher-editor-hud-field-tight">
+                          <span>Толщина</span>
+                          <input
+                            type="number"
+                            value={selectedElement.strokeWidth}
+                            onChange={(event) =>
+                              updateSelectedElement({
+                                strokeWidth: Number(event.target.value) || selectedElement.strokeWidth,
+                              })
+                            }
+                          />
+                        </label>
+                      ) : null}
+                    </details>
+                  ) : null}
+                </div>
               </div>
-              <label className="field checkbox-field">
-                <input
-                  type="checkbox"
-                  checked={selectedElement.locked}
-                  onChange={(event) => updateSelectedElement({ locked: event.target.checked })}
-                />
-                <span>Locked</span>
-              </label>
-              {'color' in selectedElement ? (
-                <label className="field">
-                  <span>Цвет</span>
-                  <input value={selectedElement.color} onChange={(event) => updateSelectedElement({ color: event.target.value })} />
-                </label>
-              ) : null}
-              {'fontSize' in selectedElement ? (
-                <label className="field">
-                  <span>Размер текста</span>
-                  <input
-                    type="number"
-                    value={selectedElement.fontSize}
-                    onChange={(event) => updateSelectedElement({ fontSize: Number(event.target.value) || selectedElement.fontSize })}
-                  />
-                </label>
-              ) : null}
-              {'fill' in selectedElement ? (
-                <label className="field">
-                  <span>Заливка</span>
-                  <input value={selectedElement.fill} onChange={(event) => updateSelectedElement({ fill: event.target.value })} />
-                </label>
-              ) : null}
-              {'strokeWidth' in selectedElement ? (
-                <label className="field">
-                  <span>Толщина</span>
-                  <input
-                    type="number"
-                    value={selectedElement.strokeWidth}
-                    onChange={(event) => updateSelectedElement({ strokeWidth: Number(event.target.value) || selectedElement.strokeWidth })}
-                  />
-                </label>
-              ) : null}
-            </>
-          ) : null}
-
-          {!selectedWidget && !selectedElement ? (
-            <div className="empty-state">Выбери виджет или board element, чтобы редактировать свойства.</div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
+      </div>
+      <div
+        className="teacher-editor-footer-note teacher-editor-hud-footer-note info-text"
+        title="Сохранение меняет шаблон урока. Уже запущенный live-run продолжит жить на своем snapshot, пока ты не перезапустишь урок."
+      >
+        Сохранение меняет шаблон урока. Уже запущенный live-run продолжит жить на своем snapshot, пока ты не перезапустишь урок.
       </div>
     </div>
   )
